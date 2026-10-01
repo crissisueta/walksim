@@ -35,6 +35,7 @@ int main(int argc, char **argv)
     Player_Init(&player, 0.0f, 0.0f);
 
     bool panelOpen       = false;  // Tab toggles the settings panel
+    bool buildingDebug   = false;
     bool rebuildTerrain  = false;  // set by the panel when a terrain setting changes
     int  skipMouseFrames = 2;      // ignore the mouse briefly after capturing it (avoids a view jump)
 
@@ -51,6 +52,7 @@ int main(int argc, char **argv)
                 skipMouseFrames = 2;
             }
         }
+        if (IsKeyPressed(KEY_F3)) buildingDebug = !buildingDebug;
 
         if (rebuildTerrain) {
             UnloadModel(terrain);
@@ -74,13 +76,17 @@ int main(int argc, char **argv)
 
             BeginMode3D(cam);
                 DrawModel(terrain, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
-                City_Draw();
+                City_Draw(buildingDebug);
             EndMode3D();
 
-            DrawText(TextFormat("seed %u   %d settlements   %d fps   [Tab] settings",
-                                 seed, City_Count(), GetFPS()), 10, 10, 20, WHITE);
-            DrawText("WASD move   Space jump   Ctrl/C crouch   Shift sprint",
+            DrawText(TextFormat("seed %u   %d settlements   %d large structures   %d fps",
+                                 seed, City_Count(), City_LargeBuildingCount(), GetFPS()),
+                     10, 10, 20, WHITE);
+            DrawText("WASD move   Space jump   Ctrl/C crouch   Shift sprint   [Tab] settings   [F3] building debug",
                      10, 34, 16, WHITE);
+            if (buildingDebug)
+                DrawText(TextFormat("M3 debug   first building seed %u",
+                                    City_FirstLargeBuildingSeed()), 10, 54, 16, WHITE);
             if (panelOpen && Config_Draw()) rebuildTerrain = true;
         EndDrawing();
     }

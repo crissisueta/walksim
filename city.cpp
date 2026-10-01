@@ -1,11 +1,13 @@
 #include "city.h"
 #include "terrain.h"
+#include "building.h"
 #include <math.h>
 
 static const int CITY_LIMIT = 5;
 static const int BUILDING_LIMIT = 20;
 static const int MODEL_LIMIT = 3;
 static const int WALL_LIMIT = 4096;
+static const int LARGE_BUILDING_LIMIT = 4;
 
 struct WallSegment {
     float x1;
@@ -16,7 +18,7 @@ struct WallSegment {
     float maxY;
 };
 
-struct Building {
+struct CityBuilding {
     Vector3 position;
     float rotation;
     float scale;
@@ -25,11 +27,19 @@ struct Building {
     Color tint;
 };
 
+struct LargeBuildingInstance {
+    Building plan;
+    Vector3 position;
+};
+
 struct City {
     Vector2 position;
     float radius;
+    unsigned int seed;
     int buildingCount;
-    Building buildings[BUILDING_LIMIT];
+    CityBuilding buildings[BUILDING_LIMIT];
+    int largeBuildingCount;
+    LargeBuildingInstance largeBuildings[LARGE_BUILDING_LIMIT];
 };
 
 static Model g_models[MODEL_LIMIT];
@@ -52,6 +62,17 @@ static unsigned int RandomU32(void)
     g_randomState ^= g_randomState >> 17;
     g_randomState ^= g_randomState << 5;
     return g_randomState;
+}
+
+static unsigned int DeriveSeed(unsigned int seed, unsigned int stream)
+{
+    unsigned int value = seed ^ (stream * 0x9E3779B9u);
+    value ^= value >> 16;
+    value *= 0x7FEB352Du;
+    value ^= value >> 15;
+    value *= 0x846CA68Bu;
+    value ^= value >> 16;
+    return value ? value : 1;
 }
 
 static float Random01(void)
@@ -222,25 +243,51 @@ static void GenerateBuildings(City *city)
     };
     const int wanted = 14 + (int)(Random01() * 7.0f);
     city->buildingCount = 0;
+    city->largeBuildingCount = 0;
 
-    for (int attempt = 0; attempt < wanted * 100 && city->buildingCount < wanted; attempt++) {
+    for (int attempt = 0; attempt < wanted * 120 &&
+         city->buildingCount + city->largeBuildingCount < wanted; attempt++) {
         float angle = RandomRange(0.0f, 2.0f * PI);
         float distance = sqrtf(Random01()) * city->radius;
         float x = city->position.x + cosf(angle) * distance;
         float z = city->position.y + sinf(angle) * distance;
         if (TerrainSlope(x, z) > 0.28f) continue;
 
+        bool largeStructure = Random01() < 0.15f;
+        if (g_modelCount == 0 && city->largeBuildingCount == 0) largeStructure = true;
+        if (city->largeBuildingCount >= LARGE_BUILDING_LIMIT) largeStructure = false;
+
         bool spaced = true;
         for (int i = 0; i < city->buildingCount; i++) {
-            const Building &other = city->buildings[i];
-            if (Distance(x, z, other.position.x, other.position.z) < 15.5f) {
+            const CityBuilding &other = city->buildings[i];
+            float minimumDistance = largeStructure ? 36.0f : 15.5f;
+            if (Distance(x, z, other.position.x, other.position.z) < minimumDistance) {
                 spaced = false;
                 break;
             }
         }
+        for (int i = 0; spaced && i < city->largeBuildingCount; i++) {
+            const LargeBuildingInstance &other = city->largeBuildings[i];
+            float minimumDistance = largeStructure ? 55.0f : 36.0f;
+            if (Distance(x, z, other.position.x, other.position.z) < minimumDistance)
+                spaced = false;
+        }
         if (!spaced) continue;
 
-        Building &building = city->buildings[city->buildingCount++];
+        if (largeStructure) {
+            const float worldLimit = TERRAIN_SIZE * 0.5f - 5.0f;
+            if (fabsf(x) + 35.0f > worldLimit || fabsf(z) + 35.0f > worldLimit) continue;
+            unsigned int buildingSeed = DeriveSeed(city->seed,
+                                                   (unsigned int)city->largeBuildingCount + 1u);
+            LargeBuildingInstance &building = city->largeBuildings[city->largeBuildingCount++];
+            building.plan = Building_GenerateTestBuilding(buildingSeed);
+            building.position = Vector3{ x, Terrain_Height(x, z), z };
+            building.plan.position = building.position;
+            continue;
+        }
+        if (g_modelCount == 0) continue;
+
+        CityBuilding &building = city->buildings[city->buildingCount++];
         building.model = (int)(Random01() * g_modelCount);
         building.scale = RandomRange(0.85f, 1.2f);
         building.rotation = RandomRange(0.0f, 360.0f);
@@ -256,12 +303,8 @@ static void GenerateBuildings(City *city)
 
 void City_Generate(unsigned int seed)
 {
-    if (g_modelCount == 0) {
-        g_cityCount = 0;
-        return;
-    }
-
-    g_randomState = seed ? seed : 1;
+    unsigned int worldSeed = seed ? seed : 1;
+    g_randomState = worldSeed;
     g_cityCount = 0;
 
     const float edge = TERRAIN_SIZE * 0.5f - 65.0f;
@@ -283,8 +326,10 @@ void City_Generate(unsigned int seed)
         if (!separated) continue;
 
         City &city = g_cities[g_cityCount++];
+        city = City{};
         city.position = Vector2{ x, z };
         city.radius = radius;
+        city.seed = DeriveSeed(worldSeed, (unsigned int)g_cityCount);
         GenerateBuildings(&city);
     }
 }
@@ -295,12 +340,12 @@ void City_Init(unsigned int seed)
     City_Generate(seed);
 }
 
-void City_Draw(void)
+void City_Draw(bool debug)
 {
     for (int i = 0; i < g_cityCount; i++) {
         const City &city = g_cities[i];
         for (int j = 0; j < city.buildingCount; j++) {
-            const Building &building = city.buildings[j];
+            const CityBuilding &building = city.buildings[j];
             float angle = building.rotation * DEG2RAD;
             float centerX = g_modelCenterX[building.model] * building.scale;
             float centerZ = g_modelCenterZ[building.model] * building.scale;
@@ -314,6 +359,8 @@ void City_Draw(void)
                         Vector3{ building.scale, building.scale, building.scale },
                         building.tint);
         }
+        for (int j = 0; j < city.largeBuildingCount; j++)
+            Building_Draw(city.largeBuildings[j].plan, debug);
     }
 }
 
@@ -322,7 +369,7 @@ bool City_Collides(float x, float z, float radius, float feetY, float height)
     for (int i = 0; i < g_cityCount; i++) {
         const City &city = g_cities[i];
         for (int j = 0; j < city.buildingCount; j++) {
-            const Building &building = city.buildings[j];
+            const CityBuilding &building = city.buildings[j];
             float dx = x - building.position.x;
             float dz = z - building.position.z;
             float broadRadius = sqrtf(g_modelHalfWidth[building.model] * g_modelHalfWidth[building.model] +
@@ -356,6 +403,10 @@ bool City_Collides(float x, float z, float radius, float feetY, float height)
                 if (outsideX * outsideX + outsideZ * outsideZ < localRadius * localRadius) return true;
             }
         }
+        for (int j = 0; j < city.largeBuildingCount; j++) {
+            if (Building_Collides(city.largeBuildings[j].plan, x, z, radius,
+                                  feetY, height)) return true;
+        }
     }
     return false;
 }
@@ -373,4 +424,19 @@ void City_Unload(void)
 int City_Count(void)
 {
     return g_cityCount;
+}
+
+int City_LargeBuildingCount(void)
+{
+    int count = 0;
+    for (int i = 0; i < g_cityCount; i++) count += g_cities[i].largeBuildingCount;
+    return count;
+}
+
+unsigned int City_FirstLargeBuildingSeed(void)
+{
+    for (int i = 0; i < g_cityCount; i++)
+        if (g_cities[i].largeBuildingCount > 0)
+            return g_cities[i].largeBuildings[0].plan.seed;
+    return 0;
 }
