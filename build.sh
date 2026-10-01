@@ -1,6 +1,6 @@
 #!/bin/sh
-# Build walksim. Requires raylib installed system-wide (see instructions).
+# Build walksim with the bundled raylib library.
 set -e
-g++ -O2 -Wall -std=c++11 game.cpp terrain.cpp player.cpp config.cpp lighting.cpp viewer.cpp -o game \
-    -lraylib -lGL -lm -lpthread -ldl -lrt -lX11
-echo "Built ./game  (run: ./game  or  ./game --view assets/house_01.glb)"
+g++ -O2 -Wall -std=c++11 -Iraylib/src game.cpp terrain.cpp city.cpp player.cpp config.cpp lighting.cpp viewer.cpp -o game \
+    -Lraylib/src -lraylib -lGL -lm -lpthread -ldl -lrt -lX11
+echo "Built ./game  (run: ./game [seed]  or  ./game --view assets/B1.obj)"

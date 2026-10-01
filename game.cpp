@@ -1,6 +1,7 @@
 #include "raylib.h"
 #include "terrain.h"
 #include "player.h"
+#include "city.h"
 #include "config.h"
 #include "viewer.h"
 #include <stdlib.h>
@@ -28,6 +29,7 @@ int main(int argc, char **argv)
 
     Terrain_Init(seed);
     Model terrain = Terrain_BuildModel();
+    City_Init(seed);
 
     Player player;
     Player_Init(&player, 0.0f, 0.0f);
@@ -53,6 +55,7 @@ int main(int argc, char **argv)
         if (rebuildTerrain) {
             UnloadModel(terrain);
             terrain = Terrain_BuildModel();
+            City_Generate(seed);
             rebuildTerrain = false;
         }
 
@@ -71,14 +74,17 @@ int main(int argc, char **argv)
 
             BeginMode3D(cam);
                 DrawModel(terrain, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
+                City_Draw();
             EndMode3D();
 
-            DrawText(TextFormat("seed %u   %d fps   [Tab] settings", seed, GetFPS()), 10, 10, 20, WHITE);
+            DrawText(TextFormat("seed %u   %d settlements   %d fps   [Tab] settings",
+                                 seed, City_Count(), GetFPS()), 10, 10, 20, WHITE);
             if (panelOpen && Config_Draw()) rebuildTerrain = true;
         EndDrawing();
     }
 
     UnloadModel(terrain);
+    City_Unload();
     CloseWindow();
     return 0;
 }
