@@ -6,6 +6,7 @@ struct Player {
     float   velY;   // vertical velocity (for gravity)
     float   yaw;    // left/right look angle, radians
     float   pitch;  // up/down look angle, radians
+    bool    crouching;
 };
 
 // Settings the in-game panel can change. Defaults live in Player_ResetParams().

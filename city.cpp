@@ -3,14 +3,24 @@
 #include <math.h>
 
 static const int CITY_LIMIT = 5;
-static const int BUILDING_LIMIT = 14;
+static const int BUILDING_LIMIT = 20;
 static const int MODEL_LIMIT = 3;
+static const int WALL_LIMIT = 4096;
+
+struct WallSegment {
+    float x1;
+    float z1;
+    float x2;
+    float z2;
+    float minY;
+    float maxY;
+};
 
 struct Building {
     Vector3 position;
     float rotation;
     float scale;
-    float baseY;
+    float groundY;
     int model;
     Color tint;
 };
@@ -24,6 +34,13 @@ struct City {
 
 static Model g_models[MODEL_LIMIT];
 static float g_modelBaseY[MODEL_LIMIT];
+static float g_modelCenterX[MODEL_LIMIT];
+static float g_modelCenterZ[MODEL_LIMIT];
+static float g_modelHalfWidth[MODEL_LIMIT];
+static float g_modelHalfDepth[MODEL_LIMIT];
+static WallSegment g_modelWalls[MODEL_LIMIT][WALL_LIMIT];
+static int g_modelWallCount[MODEL_LIMIT];
+static Texture2D g_finishTextures[MODEL_LIMIT];
 static int g_modelCount = 0;
 static City g_cities[CITY_LIMIT];
 static int g_cityCount = 0;
@@ -62,6 +79,114 @@ static float TerrainSlope(float x, float z)
     return sqrtf(dx * dx + dz * dz);
 }
 
+static Vector3 MeshVertex(const Mesh &mesh, int index)
+{
+    return Vector3{
+        mesh.vertices[index * 3],
+        mesh.vertices[index * 3 + 1],
+        mesh.vertices[index * 3 + 2]
+    };
+}
+
+static float HorizontalDistanceSquared(Vector3 a, Vector3 b)
+{
+    float dx = a.x - b.x;
+    float dz = a.z - b.z;
+    return dx * dx + dz * dz;
+}
+
+static void AddCollisionWall(int model, Vector3 a, Vector3 b, Vector3 c,
+                             float baseY, float normalY, float normalLength)
+{
+    if (normalLength == 0.0f || fabsf(normalY) > normalLength * 0.35f ||
+        g_modelWallCount[model] >= WALL_LIMIT) return;
+
+    Vector3 first = a;
+    Vector3 second = b;
+    float longest = HorizontalDistanceSquared(a, b);
+    float length = HorizontalDistanceSquared(b, c);
+    if (length > longest) { first = b; second = c; longest = length; }
+    length = HorizontalDistanceSquared(c, a);
+    if (length > longest) { first = c; second = a; longest = length; }
+    if (longest < 0.0001f) return;
+
+    WallSegment &wall = g_modelWalls[model][g_modelWallCount[model]++];
+    wall.x1 = first.x - g_modelCenterX[model];
+    wall.z1 = first.z - g_modelCenterZ[model];
+    wall.x2 = second.x - g_modelCenterX[model];
+    wall.z2 = second.z - g_modelCenterZ[model];
+    wall.minY = fminf(a.y, fminf(b.y, c.y)) - baseY;
+    wall.maxY = fmaxf(a.y, fmaxf(b.y, c.y)) - baseY;
+}
+
+static void BuildCollisionWalls(Model source, int model, float baseY)
+{
+    g_modelWallCount[model] = 0;
+    for (int meshIndex = 0; meshIndex < source.meshCount; meshIndex++) {
+        const Mesh &mesh = source.meshes[meshIndex];
+        if (mesh.vertices == NULL) continue;
+
+        for (int triangle = 0; triangle < mesh.triangleCount; triangle++) {
+            int ia = mesh.indices ? mesh.indices[triangle * 3] : triangle * 3;
+            int ib = mesh.indices ? mesh.indices[triangle * 3 + 1] : triangle * 3 + 1;
+            int ic = mesh.indices ? mesh.indices[triangle * 3 + 2] : triangle * 3 + 2;
+            Vector3 a = MeshVertex(mesh, ia);
+            Vector3 b = MeshVertex(mesh, ib);
+            Vector3 c = MeshVertex(mesh, ic);
+
+            float abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
+            float acx = c.x - a.x, acy = c.y - a.y, acz = c.z - a.z;
+            float nx = aby * acz - abz * acy;
+            float ny = abz * acx - abx * acz;
+            float nz = abx * acy - aby * acx;
+            float normalLength = sqrtf(nx * nx + ny * ny + nz * nz);
+            AddCollisionWall(model, a, b, c, baseY, ny, normalLength);
+        }
+    }
+}
+
+static Texture2D BuildConcreteTexture(int finish)
+{
+    const int size = 256;
+    Image image = GenImageColor(size, size, WHITE);
+    Color *pixels = (Color *)image.data;
+
+    for (int y = 0; y < size; y++) {
+        for (int x = 0; x < size; x++) {
+            unsigned int noise = (unsigned int)(x * 374761393u + y * 668265263u + finish * 1013904223u);
+            noise = (noise ^ (noise >> 13)) * 1274126177u;
+            int grain = (int)((noise >> 24) % 13) - 6;
+            int shade = 154 + grain;
+
+            if (finish == 0) {
+                int row = y / 4;
+                int brickX = (x + ((row & 1) ? 4 : 0)) % 8;
+                if ((y % 4) == 0 || brickX == 0) shade = 190 + grain / 2;
+                else shade += ((row * 17 + x / 8 * 11) % 13) - 6;
+            } else if (finish == 1) {
+                if ((x % 8) == 0 || (y % 8) == 0) shade = 194 + grain / 2;
+                else shade += (((x / 8) * 7 + (y / 8) * 11) % 11) - 5;
+            } else if ((noise & 0x3FFu) == 0) {
+                shade -= 24;
+            }
+
+            if (shade < 0) shade = 0;
+            if (shade > 255) shade = 255;
+            pixels[y * size + x] = Color{
+                (unsigned char)shade,
+                (unsigned char)(shade + (finish == 2 ? 1 : 0)),
+                (unsigned char)(shade + (finish == 1 ? 2 : 0)),
+                255
+            };
+        }
+    }
+
+    Texture2D texture = LoadTextureFromImage(image);
+    UnloadImage(image);
+    SetTextureFilter(texture, TEXTURE_FILTER_BILINEAR);
+    return texture;
+}
+
 static void LoadBuildingModels(void)
 {
     static const char *paths[MODEL_LIMIT] = {
@@ -74,20 +199,28 @@ static void LoadBuildingModels(void)
         if (model.meshCount == 0) continue;
 
         BoundingBox bounds = GetModelBoundingBox(model);
-        g_models[g_modelCount] = model;
-        g_modelBaseY[g_modelCount] = bounds.min.y;
-        g_modelCount++;
+        int modelIndex = g_modelCount++;
+        g_models[modelIndex] = model;
+        g_modelBaseY[modelIndex] = bounds.min.y;
+        g_modelCenterX[modelIndex] = (bounds.min.x + bounds.max.x) * 0.5f;
+        g_modelCenterZ[modelIndex] = (bounds.min.z + bounds.max.z) * 0.5f;
+        g_modelHalfWidth[modelIndex] = (bounds.max.x - bounds.min.x) * 0.5f;
+        g_modelHalfDepth[modelIndex] = (bounds.max.z - bounds.min.z) * 0.5f;
+        BuildCollisionWalls(g_models[modelIndex], modelIndex, bounds.min.y);
+        g_finishTextures[modelIndex] = BuildConcreteTexture(modelIndex);
+        for (int material = 0; material < model.materialCount; material++)
+            SetMaterialTexture(&g_models[modelIndex].materials[material],
+                               MATERIAL_MAP_DIFFUSE, g_finishTextures[modelIndex]);
     }
 }
 
 static void GenerateBuildings(City *city)
 {
     static const Color palette[] = {
-        { 232, 213, 172, 255 }, { 202, 151, 119, 255 },
-        { 205, 211, 194, 255 }, { 190, 197, 207, 255 },
-        { 222, 199, 126, 255 }
+        { 232, 232, 226, 255 }, { 213, 216, 216, 255 },
+        { 195, 200, 202, 255 }, { 242, 239, 230, 255 }
     };
-    const int wanted = 9 + (int)(Random01() * 6.0f);
+    const int wanted = 14 + (int)(Random01() * 7.0f);
     city->buildingCount = 0;
 
     for (int attempt = 0; attempt < wanted * 100 && city->buildingCount < wanted; attempt++) {
@@ -100,7 +233,7 @@ static void GenerateBuildings(City *city)
         bool spaced = true;
         for (int i = 0; i < city->buildingCount; i++) {
             const Building &other = city->buildings[i];
-            if (Distance(x, z, other.position.x, other.position.z) < 19.0f) {
+            if (Distance(x, z, other.position.x, other.position.z) < 15.5f) {
                 spaced = false;
                 break;
             }
@@ -111,10 +244,10 @@ static void GenerateBuildings(City *city)
         building.model = (int)(Random01() * g_modelCount);
         building.scale = RandomRange(0.85f, 1.2f);
         building.rotation = RandomRange(0.0f, 360.0f);
-        building.baseY = g_modelBaseY[building.model];
+        building.groundY = Terrain_Height(x, z);
         building.position = Vector3{
             x,
-            Terrain_Height(x, z) - building.baseY * building.scale,
+            building.groundY - g_modelBaseY[building.model] * building.scale,
             z
         };
         building.tint = palette[(int)(Random01() * (sizeof(palette) / sizeof(palette[0])))];
@@ -135,14 +268,14 @@ void City_Generate(unsigned int seed)
     for (int attempt = 0; attempt < 2500 && g_cityCount < CITY_LIMIT; attempt++) {
         float x = RandomRange(-edge, edge);
         float z = RandomRange(-edge, edge);
-        float radius = RandomRange(38.0f, 52.0f);
+        float radius = RandomRange(44.0f, 58.0f);
 
-        if (Distance(x, z, 0.0f, 0.0f) < 90.0f || TerrainSlope(x, z) > 0.20f) continue;
+        if (Distance(x, z, 0.0f, 0.0f) < 120.0f || TerrainSlope(x, z) > 0.20f) continue;
 
         bool separated = true;
         for (int i = 0; i < g_cityCount; i++) {
             const City &other = g_cities[i];
-            if (Distance(x, z, other.position.x, other.position.y) < 145.0f) {
+            if (Distance(x, z, other.position.x, other.position.y) < 190.0f) {
                 separated = false;
                 break;
             }
@@ -168,7 +301,15 @@ void City_Draw(void)
         const City &city = g_cities[i];
         for (int j = 0; j < city.buildingCount; j++) {
             const Building &building = city.buildings[j];
-            DrawModelEx(g_models[building.model], building.position,
+            float angle = building.rotation * DEG2RAD;
+            float centerX = g_modelCenterX[building.model] * building.scale;
+            float centerZ = g_modelCenterZ[building.model] * building.scale;
+            Vector3 origin = {
+                building.position.x - (centerX * cosf(angle) + centerZ * sinf(angle)),
+                building.position.y,
+                building.position.z - (-centerX * sinf(angle) + centerZ * cosf(angle))
+            };
+            DrawModelEx(g_models[building.model], origin,
                         Vector3{ 0.0f, 1.0f, 0.0f }, building.rotation,
                         Vector3{ building.scale, building.scale, building.scale },
                         building.tint);
@@ -176,9 +317,55 @@ void City_Draw(void)
     }
 }
 
+bool City_Collides(float x, float z, float radius, float feetY, float height)
+{
+    for (int i = 0; i < g_cityCount; i++) {
+        const City &city = g_cities[i];
+        for (int j = 0; j < city.buildingCount; j++) {
+            const Building &building = city.buildings[j];
+            float dx = x - building.position.x;
+            float dz = z - building.position.z;
+            float broadRadius = sqrtf(g_modelHalfWidth[building.model] * g_modelHalfWidth[building.model] +
+                                      g_modelHalfDepth[building.model] * g_modelHalfDepth[building.model]) *
+                                building.scale + radius;
+            if (dx * dx + dz * dz > broadRadius * broadRadius) continue;
+
+            float angle = building.rotation * DEG2RAD;
+            float localX = dx * cosf(angle) - dz * sinf(angle);
+            float localZ = dx * sinf(angle) + dz * cosf(angle);
+            localX /= building.scale;
+            localZ /= building.scale;
+            float localRadius = radius / building.scale;
+            float localFeet = (feetY - building.groundY) / building.scale;
+            float localTop = localFeet + height / building.scale;
+
+            for (int wallIndex = 0; wallIndex < g_modelWallCount[building.model]; wallIndex++) {
+                const WallSegment &wall = g_modelWalls[building.model][wallIndex];
+                if (localFeet >= wall.maxY || localTop <= wall.minY) continue;
+
+                float sx = wall.x2 - wall.x1;
+                float sz = wall.z2 - wall.z1;
+                float lengthSquared = sx * sx + sz * sz;
+                float t = ((localX - wall.x1) * sx + (localZ - wall.z1) * sz) / lengthSquared;
+                if (t < 0.0f) t = 0.0f;
+                if (t > 1.0f) t = 1.0f;
+                float nearestX = wall.x1 + sx * t;
+                float nearestZ = wall.z1 + sz * t;
+                float outsideX = localX - nearestX;
+                float outsideZ = localZ - nearestZ;
+                if (outsideX * outsideX + outsideZ * outsideZ < localRadius * localRadius) return true;
+            }
+        }
+    }
+    return false;
+}
+
 void City_Unload(void)
 {
-    for (int i = 0; i < g_modelCount; i++) UnloadModel(g_models[i]);
+    for (int i = 0; i < g_modelCount; i++) {
+        UnloadModel(g_models[i]);
+        UnloadTexture(g_finishTextures[i]);
+    }
     g_modelCount = 0;
     g_cityCount = 0;
 }

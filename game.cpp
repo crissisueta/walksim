@@ -79,6 +79,8 @@ int main(int argc, char **argv)
 
             DrawText(TextFormat("seed %u   %d settlements   %d fps   [Tab] settings",
                                  seed, City_Count(), GetFPS()), 10, 10, 20, WHITE);
+            DrawText("WASD move   Space jump   Ctrl/C crouch   Shift sprint",
+                     10, 34, 16, WHITE);
             if (panelOpen && Config_Draw()) rebuildTerrain = true;
         EndDrawing();
     }
