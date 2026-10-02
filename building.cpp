@@ -214,16 +214,73 @@ static Vector3 WorldPosition(const Building &building, const Room &room, Vector3
                     building.position.z + point.z };
 }
 
+static Color ShadeColor(Color color, float factor)
+{
+    return Color{
+        (unsigned char)(color.r * factor),
+        (unsigned char)(color.g * factor),
+        (unsigned char)(color.b * factor),
+        color.a
+    };
+}
+
+// Room rotations are constrained to right angles by Building_ValidatePlan().
+// Transforming dimensions this way keeps the primitive renderer simple while
+// allowing every room to use the same local-space drawing code.
+static void DrawRoomCube(const Building &building, const Room &room,
+                         Vector3 localCenter, Vector3 localSize, Color color)
+{
+    float angle = room.rotation * DEG2RAD;
+    Vector3 size = Vector3{
+        fabsf(cosf(angle)) * localSize.x + fabsf(sinf(angle)) * localSize.z,
+        localSize.y,
+        fabsf(cosf(angle)) * localSize.z + fabsf(sinf(angle)) * localSize.x
+    };
+    DrawCubeV(WorldPosition(building, room, localCenter), size, color);
+}
+
+static void DrawDoorFrames(const Building &building, const Room &room, int roomIndex)
+{
+    const Color trim = Color{ 101, 83, 64, 255 };
+    const float gap = room.type == ROOM_BATHROOM ? 1.2f : DOOR_WIDTH;
+    for (int side = 0; side < 4; side++) {
+        if (!SocketIsOpen(building, roomIndex, side)) continue;
+        float edge = side == 0 ? room.depth * 0.5f :
+                     side == 1 ? -room.depth * 0.5f :
+                     side == 2 ? room.width * 0.5f : -room.width * 0.5f;
+        if (side < 2) {
+            DrawRoomCube(building, room, Vector3{ -gap * 0.5f, DOOR_HEIGHT * 0.5f, edge },
+                         Vector3{ 0.12f, DOOR_HEIGHT, WALL_THICKNESS * 1.35f }, trim);
+            DrawRoomCube(building, room, Vector3{  gap * 0.5f, DOOR_HEIGHT * 0.5f, edge },
+                         Vector3{ 0.12f, DOOR_HEIGHT, WALL_THICKNESS * 1.35f }, trim);
+            DrawRoomCube(building, room, Vector3{ 0.0f, DOOR_HEIGHT, edge },
+                         Vector3{ gap + 0.18f, 0.12f, WALL_THICKNESS * 1.35f }, trim);
+            DrawRoomCube(building, room, Vector3{ 0.0f, 0.12f, edge },
+                         Vector3{ gap, 0.08f, 0.36f }, ShadeColor(trim, 0.72f));
+        } else {
+            DrawRoomCube(building, room, Vector3{ edge, DOOR_HEIGHT * 0.5f, -gap * 0.5f },
+                         Vector3{ WALL_THICKNESS * 1.35f, DOOR_HEIGHT, 0.12f }, trim);
+            DrawRoomCube(building, room, Vector3{ edge, DOOR_HEIGHT * 0.5f,  gap * 0.5f },
+                         Vector3{ WALL_THICKNESS * 1.35f, DOOR_HEIGHT, 0.12f }, trim);
+            DrawRoomCube(building, room, Vector3{ edge, DOOR_HEIGHT, 0.0f },
+                         Vector3{ WALL_THICKNESS * 1.35f, 0.12f, gap + 0.18f }, trim);
+            DrawRoomCube(building, room, Vector3{ edge, 0.12f, 0.0f },
+                         Vector3{ 0.36f, 0.08f, gap }, ShadeColor(trim, 0.72f));
+        }
+    }
+}
+
 static void DrawPlaceholderModule(const Building &building, const Room &room, int roomIndex)
 {
-    Color floorColor = room.type == ROOM_ENTRANCE ? Color{ 166, 157, 132, 255 } :
-                       room.type == ROOM_HALLWAY ? Color{ 166, 174, 170, 255 } :
-                       room.type == ROOM_BATHROOM ? Color{ 150, 183, 188, 255 } :
-                       Color{ 190, 183, 163, 255 };
-    Vector3 floor = WorldPosition(building, room, Vector3{ 0.0f, 0.08f, 0.0f });
-    Vector3 ceiling = WorldPosition(building, room, Vector3{ 0.0f, MODULE_HEIGHT - 0.08f, 0.0f });
-    DrawCube(floor, (float)room.width, 0.16f, (float)room.depth, floorColor);
-    DrawCube(ceiling, (float)room.width, 0.16f, (float)room.depth, Color{ 205, 205, 194, 255 });
+    Color floorColor = room.type == ROOM_ENTRANCE ? Color{ 133, 121, 96, 255 } :
+                       room.type == ROOM_HALLWAY ? Color{ 122, 133, 131, 255 } :
+                       room.type == ROOM_BATHROOM ? Color{ 105, 147, 154, 255 } :
+                       Color{ 145, 133, 112, 255 };
+    DrawRoomCube(building, room, Vector3{ 0.0f, 0.08f, 0.0f },
+                 Vector3{ (float)room.width, 0.16f, (float)room.depth }, floorColor);
+    DrawRoomCube(building, room, Vector3{ 0.0f, MODULE_HEIGHT - 0.08f, 0.0f },
+                 Vector3{ (float)room.width, 0.16f, (float)room.depth },
+                 Color{ 184, 184, 174, 255 });
 
     WallPiece pieces[12];
     int pieceCount = RoomWallPieces(building, roomIndex, pieces);
@@ -234,18 +291,17 @@ static void DrawPlaceholderModule(const Building &building, const Room &room, in
             (piece.minY + piece.maxY) * 0.5f,
             (piece.first.z + piece.second.z) * 0.5f
         };
-        Vector3 center = WorldPosition(building, room, localCenter);
         float length = sqrtf((piece.second.x - piece.first.x) * (piece.second.x - piece.first.x) +
                              (piece.second.z - piece.first.z) * (piece.second.z - piece.first.z));
         bool alongX = fabsf(piece.second.x - piece.first.x) > fabsf(piece.second.z - piece.first.z);
         float sizeX = alongX ? length : WALL_THICKNESS;
         float sizeZ = alongX ? WALL_THICKNESS : length;
-        float angle = room.rotation * DEG2RAD;
-        float worldSizeX = fabsf(cosf(angle)) * sizeX + fabsf(sinf(angle)) * sizeZ;
-        float worldSizeZ = fabsf(cosf(angle)) * sizeZ + fabsf(sinf(angle)) * sizeX;
-        DrawCubeV(center, Vector3{ worldSizeX, piece.maxY - piece.minY, worldSizeZ },
-                  Color{ 207, 204, 190, 255 });
+        float lightFacing = alongX ? 0.92f : 0.82f;
+        DrawRoomCube(building, room, localCenter,
+                     Vector3{ sizeX, piece.maxY - piece.minY, sizeZ },
+                     ShadeColor(Color{ 214, 210, 197, 255 }, lightFacing));
     }
+    DrawDoorFrames(building, room, roomIndex);
 }
 
 static float SegmentDistanceSquared(float x, float z, Vector3 a, Vector3 b)

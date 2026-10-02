@@ -19,5 +19,9 @@ extern TerrainParams g_terrainParams;
 
 void  Terrain_ResetParams(void);         // restore default TerrainParams
 void  Terrain_Init(unsigned int seed);   // call once, before anything else
+float Terrain_BaseHeight(float x, float z); // natural terrain, without building pads
 float Terrain_Height(float x, float z);  // ground height at world (x, z)
+void  Terrain_ClearPads(void);            // remove all local building terrain edits
+void  Terrain_AddBuildingPad(float x, float z, float halfWidth, float halfDepth,
+                             float height, float blendWidth);
 Model Terrain_BuildModel(void);          // after params change: UnloadModel, then call this again

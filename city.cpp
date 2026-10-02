@@ -1,6 +1,7 @@
 #include "city.h"
 #include "terrain.h"
 #include "building.h"
+#include "lighting.h"
 #include <math.h>
 
 static const int CITY_LIMIT = 5;
@@ -98,6 +99,45 @@ static float TerrainSlope(float x, float z)
     float dx = (Terrain_Height(x + sample, z) - Terrain_Height(x - sample, z)) / (2.0f * sample);
     float dz = (Terrain_Height(x, z + sample) - Terrain_Height(x, z - sample)) / (2.0f * sample);
     return sqrtf(dx * dx + dz * dz);
+}
+
+static void LargeBuildingPad(const Building &building, float *halfWidth, float *halfDepth)
+{
+    float minX = 0.0f, maxX = 0.0f, minZ = 0.0f, maxZ = 0.0f;
+    for (size_t i = 0; i < building.rooms.size(); i++) {
+        const Room &room = building.rooms[i];
+        float angle = room.rotation * DEG2RAD;
+        float roomHalfWidth = (room.width * fabsf(cosf(angle)) +
+                               room.depth * fabsf(sinf(angle))) * 0.5f;
+        float roomHalfDepth = (room.depth * fabsf(cosf(angle)) +
+                               room.width * fabsf(sinf(angle))) * 0.5f;
+        float roomMinX = room.position.x - roomHalfWidth;
+        float roomMaxX = room.position.x + roomHalfWidth;
+        float roomMinZ = room.position.z - roomHalfDepth;
+        float roomMaxZ = room.position.z + roomHalfDepth;
+        if (i == 0 || roomMinX < minX) minX = roomMinX;
+        if (i == 0 || roomMaxX > maxX) maxX = roomMaxX;
+        if (i == 0 || roomMinZ < minZ) minZ = roomMinZ;
+        if (i == 0 || roomMaxZ > maxZ) maxZ = roomMaxZ;
+    }
+    *halfWidth = (maxX - minX) * 0.5f + 0.35f;
+    *halfDepth = (maxZ - minZ) * 0.5f + 0.35f;
+}
+
+static float LargeBuildingFoundationHeight(float x, float z, float halfWidth, float halfDepth)
+{
+    // Average a 5x5 footprint grid. This is stable, reflects the terrain the
+    // building actually occupies, and avoids choosing a single extreme point.
+    float total = 0.0f;
+    const int samples = 5;
+    for (int iz = 0; iz < samples; iz++) {
+        for (int ix = 0; ix < samples; ix++) {
+            float sx = x + halfWidth * (2.0f * ix / (samples - 1) - 1.0f);
+            float sz = z + halfDepth * (2.0f * iz / (samples - 1) - 1.0f);
+            total += Terrain_BaseHeight(sx, sz);
+        }
+    }
+    return total / (samples * samples);
 }
 
 static Vector3 MeshVertex(const Mesh &mesh, int index)
@@ -281,7 +321,11 @@ static void GenerateBuildings(City *city)
                                                    (unsigned int)city->largeBuildingCount + 1u);
             LargeBuildingInstance &building = city->largeBuildings[city->largeBuildingCount++];
             building.plan = Building_GenerateTestBuilding(buildingSeed);
-            building.position = Vector3{ x, Terrain_Height(x, z), z };
+            float halfWidth, halfDepth;
+            LargeBuildingPad(building.plan, &halfWidth, &halfDepth);
+            float foundationY = LargeBuildingFoundationHeight(x, z, halfWidth, halfDepth);
+            Terrain_AddBuildingPad(x, z, halfWidth, halfDepth, foundationY, 8.0f);
+            building.position = Vector3{ x, foundationY, z };
             building.plan.position = building.position;
             continue;
         }
@@ -306,6 +350,7 @@ void City_Generate(unsigned int seed)
     unsigned int worldSeed = seed ? seed : 1;
     g_randomState = worldSeed;
     g_cityCount = 0;
+    Terrain_ClearPads();
 
     const float edge = TERRAIN_SIZE * 0.5f - 65.0f;
     for (int attempt = 0; attempt < 2500 && g_cityCount < CITY_LIMIT; attempt++) {
@@ -338,6 +383,11 @@ void City_Init(unsigned int seed)
 {
     LoadBuildingModels();
     City_Generate(seed);
+}
+
+void City_SetLighting(Shader shader)
+{
+    for (int i = 0; i < g_modelCount; i++) Lighting_Attach(&g_models[i], shader);
 }
 
 void City_Draw(bool debug)
@@ -414,6 +464,7 @@ bool City_Collides(float x, float z, float radius, float feetY, float height)
 void City_Unload(void)
 {
     for (int i = 0; i < g_modelCount; i++) {
+        Lighting_Detach(&g_models[i]);
         UnloadModel(g_models[i]);
         UnloadTexture(g_finishTextures[i]);
     }

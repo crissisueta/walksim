@@ -4,6 +4,7 @@
 #include "city.h"
 #include "config.h"
 #include "viewer.h"
+#include "lighting.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,8 +29,10 @@ int main(int argc, char **argv)
     }
 
     Terrain_Init(seed);
-    Model terrain = Terrain_BuildModel();
+    Shader lighting = Lighting_LoadShader();
     City_Init(seed);
+    City_SetLighting(lighting);
+    Model terrain = Terrain_BuildModel();
 
     Player player;
     Player_Init(&player, 0.0f, 0.0f);
@@ -55,9 +58,9 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_F3)) buildingDebug = !buildingDebug;
 
         if (rebuildTerrain) {
+            City_Generate(seed);
             UnloadModel(terrain);
             terrain = Terrain_BuildModel();
-            City_Generate(seed);
             rebuildTerrain = false;
         }
 
@@ -93,6 +96,7 @@ int main(int argc, char **argv)
 
     UnloadModel(terrain);
     City_Unload();
+    UnloadShader(lighting);
     CloseWindow();
     return 0;
 }

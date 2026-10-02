@@ -3,6 +3,18 @@
 
 static unsigned int g_seed = 0;
 
+// Pads are registered by city generation before the terrain mesh is built.
+// A fixed-size list keeps the terrain API simple and matches the city limits.
+static const int TERRAIN_PAD_LIMIT = 20;
+struct TerrainPad {
+    float x, z;
+    float halfWidth, halfDepth;
+    float height;
+    float blendWidth;
+};
+static TerrainPad g_pads[TERRAIN_PAD_LIMIT];
+static int g_padCount = 0;
+
 // ---------------------------------------------------------------------------
 // Seeded value noise. No external library, fully deterministic for a given seed.
 // ---------------------------------------------------------------------------
@@ -56,9 +68,10 @@ void Terrain_Init(unsigned int seed)
 {
     g_seed = seed;
     Terrain_ResetParams();
+    Terrain_ClearPads();
 }
 
-float Terrain_Height(float x, float z)
+float Terrain_BaseHeight(float x, float z)
 {
     // Three octaves: big hills, medium bumps, small ripples (see TerrainParams).
     const TerrainParams &p = g_terrainParams;
@@ -66,6 +79,39 @@ float Terrain_Height(float x, float z)
     for (int i = 0; i < 3; i++)
         h += Noise(x / p.wavelength[i], z / p.wavelength[i], i) * p.amp[i];
     return h;
+}
+
+void Terrain_ClearPads(void)
+{
+    g_padCount = 0;
+}
+
+void Terrain_AddBuildingPad(float x, float z, float halfWidth, float halfDepth,
+                            float height, float blendWidth)
+{
+    if (g_padCount >= TERRAIN_PAD_LIMIT) return;
+    g_pads[g_padCount++] = TerrainPad{ x, z, halfWidth, halfDepth, height, blendWidth };
+}
+
+float Terrain_Height(float x, float z)
+{
+    float height = Terrain_BaseHeight(x, z);
+    for (int i = 0; i < g_padCount; i++) {
+        const TerrainPad &pad = g_pads[i];
+        float dx = fabsf(x - pad.x) - pad.halfWidth;
+        float dz = fabsf(z - pad.z) - pad.halfDepth;
+        if (dx < 0.0f) dx = 0.0f;
+        if (dz < 0.0f) dz = 0.0f;
+        float distance = sqrtf(dx * dx + dz * dz);
+        if (distance >= pad.blendWidth) continue;
+
+        // Cubic smoothstep holds the complete footprint level, then blends
+        // into the untouched height function without a visible hard edge.
+        float t = distance / pad.blendWidth;
+        float blend = t * t * (3.0f - 2.0f * t);
+        height = Lerpf(pad.height, height, blend);
+    }
+    return height;
 }
 
 // Grass colour for one vertex, with sun shading baked in (no shaders needed).
