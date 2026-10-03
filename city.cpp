@@ -387,6 +387,26 @@ void City_Draw(bool debug)
     }
 }
 
+void City_DrawDebugLabels(Camera3D camera)
+{
+    // Text is a 2D raylib primitive, so project room centres after the 3D pass
+    // instead of introducing a second text renderer just for diagnostics.
+    for (int i = 0; i < g_cityCount; i++) {
+        const City &city = g_cities[i];
+        for (int j = 0; j < city.largeBuildingCount; j++) {
+            const Building &building = city.largeBuildings[j].plan;
+            for (size_t roomIndex = 0; roomIndex < building.rooms.size(); roomIndex++) {
+                const Room &room = building.rooms[roomIndex];
+                Vector3 center = Vector3{ building.position.x + room.position.x,
+                                          building.position.y + room.position.y + room.height * 0.5f,
+                                          building.position.z + room.position.z };
+                Vector2 screen = GetWorldToScreen(center, camera);
+                DrawText(Building_RoomTypeName(room.type), (int)screen.x, (int)screen.y, 14, YELLOW);
+            }
+        }
+    }
+}
+
 bool City_Collides(float x, float z, float radius, float feetY, float height)
 {
     for (int i = 0; i < g_cityCount; i++) {
@@ -434,13 +454,14 @@ bool City_Collides(float x, float z, float radius, float feetY, float height)
     return false;
 }
 
-float City_GroundHeight(float x, float z, float terrainHeight)
+float City_GroundHeight(float x, float z, float terrainHeight, float maximumHeight)
 {
     float ground = terrainHeight;
     for (int i = 0; i < g_cityCount; i++) {
         const City &city = g_cities[i];
         for (int j = 0; j < city.largeBuildingCount; j++)
-            ground = Building_FloorHeight(city.largeBuildings[j].plan, x, z, ground);
+            ground = Building_FloorHeight(city.largeBuildings[j].plan, x, z, ground,
+                                          maximumHeight);
     }
     return ground;
 }

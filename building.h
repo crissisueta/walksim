@@ -30,6 +30,25 @@ enum SocketType {
     SOCKET_STAIRS
 };
 
+// Sides use the room's unrotated local axes: north (+Z), south (-Z), east
+// (+X), west (-X). Room::rotation is applied when window geometry is drawn.
+enum RoomSide {
+    ROOM_SIDE_NORTH,
+    ROOM_SIDE_SOUTH,
+    ROOM_SIDE_EAST,
+    ROOM_SIDE_WEST
+};
+
+// A window opening along one wall. offset is measured from the wall centre;
+// bottom and height are measured upward from the room floor underside.
+struct RoomWindow {
+    RoomSide side;
+    float offset;
+    float width;
+    float bottom;
+    float height;
+};
+
 struct Socket {
     // Local doorway/boundary midpoint and its outward-facing rotation.
     Vector3 position;
@@ -45,6 +64,7 @@ struct Room {
     int depth;
     float height;
     std::vector<Socket> sockets;
+    std::vector<RoomWindow> windows;
 };
 
 struct BuildingConnection {
@@ -70,6 +90,7 @@ Building Building_GenerateTestBuilding(unsigned int seed);
 // Loads definitions in the simple [room_type] key=value format. A failed load
 // leaves the built-in definitions active, so generation always remains usable.
 bool Building_LoadRoomDefinitions(const char *path);
+const char *Building_RoomTypeName(RoomType type);
 // Call after position and terrain pads are final. This samples terrain once and
 // stores the resulting visual supports in the building instance.
 void Building_GenerateSupports(Building *building);
@@ -79,9 +100,9 @@ bool Building_ValidatePlan(const Building &building);
 void Building_Draw(const Building &building, bool debug);
 bool Building_Collides(const Building &building, float x, float z,
                        float radius, float feetY, float height);
-// Returns the walkable floor above currentGround, if this point is in a room.
+// Returns room slab tops that are reachable from maximumHeight, or currentGround.
 float Building_FloorHeight(const Building &building, float x, float z,
-                           float currentGround);
+                           float currentGround, float maximumHeight);
 // Returns the nearest ceiling above minimumHeight, or FLT_MAX if none exists.
 float Building_CeilingHeight(const Building &building, float x, float z,
                              float minimumHeight);

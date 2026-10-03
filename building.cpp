@@ -17,10 +17,11 @@ static const float CEILING_THICKNESS = 0.16f;
 static const float DOOR_WIDTH = 1.6f;
 static const float DOOR_HEIGHT = 2.2f;
 static const float BUILDING_LIMIT = 35.0f;
-static const int WALL_PIECE_LIMIT = 24;
+static const int WALL_PIECE_LIMIT = 64;
 static const float BUILDING_SUPPORT_MIN_HEIGHT = 0.25f;
 static const float BUILDING_SUPPORT_DUPLICATE_DISTANCE = 0.75f;
 static const float BUILDING_SUPPORT_WIDTH = 0.35f;
+static const float BUILDING_STEP_HEIGHT = 0.30f;
 
 // Room templates intentionally use a tiny INI-like format instead of a
 // general serialization system. The generator only needs dimensions and the
@@ -30,13 +31,14 @@ struct RoomDefinition {
     int depth;
     float height;
     SocketType socketType;
+    std::vector<RoomWindow> windows;
 };
 
 static const int ROOM_TYPE_COUNT = 4;
 static RoomDefinition g_roomDefinitions[ROOM_TYPE_COUNT];
 static bool g_roomDefinitionsInitialized = false;
 
-static const char *RoomTypeName(RoomType type)
+const char *Building_RoomTypeName(RoomType type)
 {
     switch (type) {
         case ROOM_ENTRANCE: return "entrance";
@@ -50,16 +52,16 @@ static const char *RoomTypeName(RoomType type)
 static int RoomTypeFromName(const char *name)
 {
     for (int type = 0; type < ROOM_TYPE_COUNT; type++)
-        if (strcmp(name, RoomTypeName((RoomType)type)) == 0) return type;
+        if (strcmp(name, Building_RoomTypeName((RoomType)type)) == 0) return type;
     return -1;
 }
 
 static void SetDefaultRoomDefinitions(RoomDefinition *definitions)
 {
-    definitions[ROOM_ENTRANCE] = RoomDefinition{ 10, 10, 3.0f, SOCKET_DOOR };
-    definitions[ROOM_HALLWAY] = RoomDefinition{ 5, 10, 3.0f, SOCKET_CORRIDOR };
-    definitions[ROOM_ROOM] = RoomDefinition{ 10, 10, 3.0f, SOCKET_DOOR };
-    definitions[ROOM_BATHROOM] = RoomDefinition{ 5, 5, 3.0f, SOCKET_DOOR };
+    definitions[ROOM_ENTRANCE] = RoomDefinition{ 10, 10, 3.0f, SOCKET_DOOR, std::vector<RoomWindow>() };
+    definitions[ROOM_HALLWAY] = RoomDefinition{ 5, 10, 3.0f, SOCKET_CORRIDOR, std::vector<RoomWindow>() };
+    definitions[ROOM_ROOM] = RoomDefinition{ 10, 10, 3.0f, SOCKET_DOOR, std::vector<RoomWindow>() };
+    definitions[ROOM_BATHROOM] = RoomDefinition{ 5, 5, 3.0f, SOCKET_DOOR, std::vector<RoomWindow>() };
 }
 
 static char *Trim(char *text)
@@ -85,6 +87,28 @@ static bool ParsePositiveFloat(const char *text, float *value)
     float parsed = strtof(text, &end);
     if (!end || *Trim(end) || parsed <= 0.0f || parsed > 1000.0f) return false;
     *value = parsed;
+    return true;
+}
+
+static int RoomSideFromName(const char *name)
+{
+    static const char *names[] = { "north", "south", "east", "west" };
+    for (int side = 0; side < 4; side++)
+        if (strcmp(name, names[side]) == 0) return side;
+    return -1;
+}
+
+// window=side,offset,width,bottom,height; parsing it here keeps the external
+// format deliberately small while allowing several window lines per template.
+static bool ParseWindow(const char *text, RoomWindow *window)
+{
+    char side[16] = {};
+    if (sscanf(text, " %15[^,],%f,%f,%f,%f", side, &window->offset, &window->width,
+               &window->bottom, &window->height) != 5) return false;
+    int parsedSide = RoomSideFromName(Trim(side));
+    if (parsedSide < 0 || window->width <= 0.0f || window->height <= 0.0f ||
+        window->bottom < FLOOR_THICKNESS) return false;
+    window->side = (RoomSide)parsedSide;
     return true;
 }
 
@@ -117,13 +141,17 @@ bool Building_LoadRoomDefinitions(const char *path)
             text[length - 1] = '\0';
             currentType = RoomTypeFromName(Trim(text + 1));
             if (currentType < 0) {
-                fprintf(stderr, "Building definitions:%d: unknown room type '%s'.\n", lineNumber, text + 1);
-                valid = false;
+                // Extra templates are useful to keep beside the active four
+                // types, even though the current enum cannot select them yet.
+                fprintf(stderr, "Building definitions:%d: [%s] is not used by the current generator; ignoring it.\n",
+                        lineNumber, text + 1);
+                currentType = -2;
             }
             continue;
         }
 
         char *equals = strchr(text, '=');
+        if (currentType == -2) continue;
         if (currentType < 0 || !equals) {
             fprintf(stderr, "Building definitions:%d: expected [room_type] or key=value.\n", lineNumber);
             valid = false;
@@ -152,6 +180,10 @@ bool Building_LoadRoomDefinitions(const char *path)
             }
             parsed = true;
             fields[currentType] |= 8;
+        } else if (strcmp(key, "window") == 0) {
+            RoomWindow window = {};
+            parsed = ParseWindow(value, &window);
+            if (parsed) definitions[currentType].windows.push_back(window);
         } else {
             fprintf(stderr, "Building definitions:%d: unknown key '%s'.\n", lineNumber, key);
             valid = false;
@@ -167,8 +199,19 @@ bool Building_LoadRoomDefinitions(const char *path)
     for (int type = 0; type < ROOM_TYPE_COUNT; type++) {
         if (fields[type] != 15) {
             fprintf(stderr, "Building definitions: [%s] must define width, depth, height, and socket.\n",
-                    RoomTypeName((RoomType)type));
+                    Building_RoomTypeName((RoomType)type));
             valid = false;
+        }
+        const RoomDefinition &definition = definitions[type];
+        for (size_t windowIndex = 0; windowIndex < definition.windows.size(); windowIndex++) {
+            const RoomWindow &window = definition.windows[windowIndex];
+            float span = window.side < ROOM_SIDE_EAST ? (float)definition.width : (float)definition.depth;
+            if (fabsf(window.offset) + window.width * 0.5f > span * 0.5f - WALL_THICKNESS ||
+                window.bottom + window.height > definition.height - CEILING_THICKNESS) {
+                fprintf(stderr, "Building definitions: [%s] has a window outside its wall bounds.\n",
+                        Building_RoomTypeName((RoomType)type));
+                valid = false;
+            }
         }
     }
     g_roomDefinitionsInitialized = true;
@@ -177,7 +220,8 @@ bool Building_LoadRoomDefinitions(const char *path)
         SetDefaultRoomDefinitions(g_roomDefinitions);
         return false;
     }
-    memcpy(g_roomDefinitions, definitions, sizeof(g_roomDefinitions));
+    for (int type = 0; type < ROOM_TYPE_COUNT; type++)
+        g_roomDefinitions[type] = definitions[type];
     return true;
 }
 
@@ -275,6 +319,7 @@ static Room MakeRoom(RoomType type, Vector3 position, float rotation)
     room.depth = RoomDepth(type);
     room.height = RoomHeight(type);
     SocketType socketType = RoomSocketType(type);
+    room.windows = g_roomDefinitions[type].windows;
     room.sockets.push_back(Socket{ Vector3{ 0.0f, 1.2f, room.depth * 0.5f }, 0.0f, socketType });
     room.sockets.push_back(Socket{ Vector3{ 0.0f, 1.2f, -room.depth * 0.5f }, 180.0f, socketType });
     room.sockets.push_back(Socket{ Vector3{ room.width * 0.5f, 1.2f, 0.0f }, 90.0f, socketType });
@@ -524,8 +569,17 @@ static void CollectBoundaryIntervals(const Building &building, int roomIndex, in
 
 static void AddBoundaryWallPieces(WallPiece *pieces, int *pieceCount, int side, float edge,
                                   float first, float second, bool opening, float gap,
-                                  float roomHeight)
+                                  float roomHeight, const RoomWindow *window)
 {
+    if (window) {
+        // The interval has already been split at both window edges. Preserve
+        // wall below and above the glazing so this is a real wall opening.
+        AddWallPiece(pieces, pieceCount, side, edge, first, second,
+                     FLOOR_THICKNESS, window->bottom);
+        AddWallPiece(pieces, pieceCount, side, edge, first, second,
+                     window->bottom + window->height, roomHeight - CEILING_THICKNESS);
+        return;
+    }
     if (!opening) {
         AddWallPiece(pieces, pieceCount, side, edge, first, second,
                      FLOOR_THICKNESS, roomHeight - CEILING_THICKNESS);
@@ -559,6 +613,12 @@ static int RoomWallPieces(const Building &building, int roomIndex, WallPiece *pi
             cuts.push_back(intervals[i].first);
             cuts.push_back(intervals[i].second);
         }
+        for (size_t i = 0; i < room.windows.size(); i++) {
+            const RoomWindow &window = room.windows[i];
+            if ((int)window.side != side) continue;
+            cuts.push_back(window.offset - window.width * 0.5f);
+            cuts.push_back(window.offset + window.width * 0.5f);
+        }
         std::sort(cuts.begin(), cuts.end());
         for (size_t intervalIndex = 0; intervalIndex + 1 < cuts.size(); intervalIndex++) {
             float first = cuts[intervalIndex];
@@ -575,11 +635,29 @@ static int RoomWallPieces(const Building &building, int roomIndex, WallPiece *pi
             bool owner = peer == NULL || ConnectedBoundaryOwner(building, roomIndex, side,
                                                                   peer->peerRoom, peer->peerSocket);
             if (!owner) continue;
+            // A shared segment has one draw owner, but its vertical extent is
+            // structural for both rooms. Without this, a shorter owner leaves
+            // a gap beside a taller neighbouring room.
+            float wallHeight = room.height;
+            if (peer && building.rooms[peer->peerRoom].height > wallHeight)
+                wallHeight = building.rooms[peer->peerRoom].height;
             bool opening = peer ? IsOpenConnection(building, roomIndex, side,
                                                     peer->peerRoom, peer->peerSocket)
                                 : (roomIndex == building.entranceRoom && side == building.exteriorSocket);
+            const RoomWindow *window = NULL;
+            if (!peer && !opening) {
+                for (size_t i = 0; i < room.windows.size(); i++) {
+                    const RoomWindow &candidate = room.windows[i];
+                    if ((int)candidate.side == side &&
+                        midpoint > candidate.offset - candidate.width * 0.5f + 0.001f &&
+                        midpoint < candidate.offset + candidate.width * 0.5f - 0.001f) {
+                        window = &candidate;
+                        break;
+                    }
+                }
+            }
             AddBoundaryWallPieces(pieces, &pieceCount, side, edge, first, second, opening, gap,
-                                  room.height);
+                                  wallHeight, window);
         }
     }
     return pieceCount;
@@ -815,6 +893,58 @@ static void DrawDoorFrames(const Building &building, const Room &room, int roomI
     }
 }
 
+static bool WindowIsExterior(const Building &building, int roomIndex, const RoomWindow &window)
+{
+    if (roomIndex == building.entranceRoom && (int)window.side == building.exteriorSocket) return false;
+    std::vector<BoundaryInterval> intervals;
+    CollectBoundaryIntervals(building, roomIndex, (int)window.side, &intervals);
+    for (size_t i = 0; i < intervals.size(); i++)
+        if (window.offset > intervals[i].first + 0.001f &&
+            window.offset < intervals[i].second - 0.001f) return false;
+    return true;
+}
+
+// The glass is deliberately a thin tinted cube: it remains asset-free and the
+// surrounding four trim pieces make the opening visually distinct from a door.
+static void DrawRoomWindows(const Building &building, const Room &room, int roomIndex)
+{
+    const float frame = 0.10f;
+    const float glassDepth = 0.035f;
+    const Color trim = Color{ 76, 76, 70, 255 };
+    const Color glass = Color{ 116, 180, 205, 145 };
+    for (size_t index = 0; index < room.windows.size(); index++) {
+        const RoomWindow &window = room.windows[index];
+        if (!WindowIsExterior(building, roomIndex, window)) continue;
+        float edge = window.side == ROOM_SIDE_NORTH ? room.depth * 0.5f :
+                     window.side == ROOM_SIDE_SOUTH ? -room.depth * 0.5f :
+                     window.side == ROOM_SIDE_EAST ? room.width * 0.5f : -room.width * 0.5f;
+        float centerY = window.bottom + window.height * 0.5f;
+        if (window.side == ROOM_SIDE_NORTH || window.side == ROOM_SIDE_SOUTH) {
+            DrawRoomCube(building, room, Vector3{ window.offset, centerY, edge },
+                         // Local X runs along north/south walls; Y is always
+                         // vertical, so glass thickness belongs on local Z.
+                         Vector3{ window.width, window.height, glassDepth }, glass);
+            for (int sign = -1; sign <= 1; sign += 2)
+                DrawRoomCube(building, room, Vector3{ window.offset + sign * (window.width - frame) * 0.5f, centerY, edge },
+                             Vector3{ frame, window.height + frame * 2.0f, frame }, trim);
+            DrawRoomCube(building, room, Vector3{ window.offset, window.bottom - frame * 0.5f, edge },
+                         Vector3{ window.width, frame, frame }, trim);
+            DrawRoomCube(building, room, Vector3{ window.offset, window.bottom + window.height + frame * 0.5f, edge },
+                         Vector3{ window.width, frame, frame }, trim);
+        } else {
+            DrawRoomCube(building, room, Vector3{ edge, centerY, window.offset },
+                         Vector3{ glassDepth, window.height, window.width }, glass);
+            for (int sign = -1; sign <= 1; sign += 2)
+                DrawRoomCube(building, room, Vector3{ edge, centerY, window.offset + sign * (window.width - frame) * 0.5f },
+                             Vector3{ frame, window.height + frame * 2.0f, frame }, trim);
+            DrawRoomCube(building, room, Vector3{ edge, window.bottom - frame * 0.5f, window.offset },
+                         Vector3{ frame, frame, window.width }, trim);
+            DrawRoomCube(building, room, Vector3{ edge, window.bottom + window.height + frame * 0.5f, window.offset },
+                         Vector3{ frame, frame, window.width }, trim);
+        }
+    }
+}
+
 static void DrawPlaceholderModule(const Building &building, const Room &room, int roomIndex,
                                   std::vector<DebugGeometry> *debugGeometry)
 {
@@ -856,6 +986,7 @@ static void DrawPlaceholderModule(const Building &building, const Room &room, in
                          DEBUG_WALL, roomIndex, i);
     }
     DrawDoorFrames(building, room, roomIndex, debugGeometry);
+    DrawRoomWindows(building, room, roomIndex);
 }
 
 static float SegmentDistanceSquared(float x, float z, Vector3 a, Vector3 b)
@@ -869,6 +1000,27 @@ static float SegmentDistanceSquared(float x, float z, Vector3 a, Vector3 b)
     float dx = x - (a.x + sx * t);
     float dz = z - (a.z + sz * t);
     return dx * dx + dz * dz;
+}
+
+// Tests the player's horizontal circle against a room footprint. Together with
+// a vertical overlap check this treats floors and ceilings as solid slabs.
+static bool RoomFootprintCollides(const Building &building, const Room &room,
+                                  float x, float z, float radius)
+{
+    float worldX = x - building.position.x - room.position.x;
+    float worldZ = z - building.position.z - room.position.z;
+    float angle = room.rotation * DEG2RAD;
+    float localX = worldX * cosf(angle) - worldZ * sinf(angle);
+    float localZ = worldX * sinf(angle) + worldZ * cosf(angle);
+    return localX >= -room.width * 0.5f - radius &&
+           localX <=  room.width * 0.5f + radius &&
+           localZ >= -room.depth * 0.5f - radius &&
+           localZ <=  room.depth * 0.5f + radius;
+}
+
+static bool RoomContainsPoint(const Building &building, const Room &room, float x, float z)
+{
+    return RoomFootprintCollides(building, room, x, z, 0.0f);
 }
 
 Building Building_GenerateTestBuilding(unsigned int seed)
@@ -1043,29 +1195,38 @@ bool Building_Collides(const Building &building, float x, float z,
             if (SegmentDistanceSquared(x, z, worldA, worldB) < collisionRadius * collisionRadius)
                 return true;
         }
+
+        // Floors and ceilings are thin cuboids, not infinitely thin planes.
+        // Their vertical faces therefore block a player trying to enter a
+        // slab from the side while below or above the room.
+        float floorMinY = building.position.y + room.position.y;
+        float floorMaxY = floorMinY + FLOOR_THICKNESS;
+        float ceilingMaxY = building.position.y + room.position.y + room.height;
+        float ceilingMinY = ceilingMaxY - CEILING_THICKNESS;
+        bool overlapsFloor = feetY < floorMaxY && feetY + height > floorMinY;
+        bool overlapsCeiling = feetY < ceilingMaxY && feetY + height > ceilingMinY;
+        // A slab no higher than the player's ordinary ground snap is a step,
+        // so test its exact edge. Higher slabs retain the radius-expanded edge
+        // and cannot be entered from below as though they were ramps.
+        float floorRadius = floorMaxY <= feetY + BUILDING_STEP_HEIGHT ? 0.0f : radius;
+        if (overlapsFloor && RoomFootprintCollides(building, room, x, z, floorRadius)) return true;
+        if (overlapsCeiling && RoomFootprintCollides(building, room, x, z, radius)) return true;
     }
     return false;
 }
 
 float Building_FloorHeight(const Building &building, float x, float z,
-                           float currentGround)
+                           float currentGround, float maximumHeight)
 {
     float ground = currentGround;
     for (size_t roomIndex = 0; roomIndex < building.rooms.size(); roomIndex++) {
         const Room &room = building.rooms[roomIndex];
-        float worldX = x - building.position.x - room.position.x;
-        float worldZ = z - building.position.z - room.position.z;
-        float angle = room.rotation * DEG2RAD;
+        if (!RoomContainsPoint(building, room, x, z)) continue;
 
-        // Inverse of RoomToBuilding's horizontal rotation. The floor rectangle
-        // is the same local width/depth used by DrawPlaceholderModule().
-        float localX = worldX * cosf(angle) - worldZ * sinf(angle);
-        float localZ = worldX * sinf(angle) + worldZ * cosf(angle);
-        if (fabsf(localX) <= room.width * 0.5f &&
-            fabsf(localZ) <= room.depth * 0.5f) {
-            float floorTop = building.position.y + FLOOR_THICKNESS;
-            if (floorTop > ground) ground = floorTop;
-        }
+        float floorTop = building.position.y + room.position.y + FLOOR_THICKNESS;
+        float ceilingTop = building.position.y + room.position.y + room.height;
+        if (floorTop <= maximumHeight && floorTop > ground) ground = floorTop;
+        if (ceilingTop <= maximumHeight && ceilingTop > ground) ground = ceilingTop;
     }
     return ground;
 }
@@ -1076,15 +1237,12 @@ float Building_CeilingHeight(const Building &building, float x, float z,
     float ceiling = FLT_MAX;
     for (size_t roomIndex = 0; roomIndex < building.rooms.size(); roomIndex++) {
         const Room &room = building.rooms[roomIndex];
-        float worldX = x - building.position.x - room.position.x;
-        float worldZ = z - building.position.z - room.position.z;
-        float angle = room.rotation * DEG2RAD;
-        float localX = worldX * cosf(angle) - worldZ * sinf(angle);
-        float localZ = worldX * sinf(angle) + worldZ * cosf(angle);
+        if (!RoomContainsPoint(building, room, x, z)) continue;
+        float floorUnderside = building.position.y + room.position.y;
         float underside = building.position.y + room.position.y + room.height - CEILING_THICKNESS;
-        if (fabsf(localX) <= room.width * 0.5f &&
-            fabsf(localZ) <= room.depth * 0.5f &&
-            underside >= minimumHeight && underside < ceiling)
+        if (floorUnderside >= minimumHeight && floorUnderside < ceiling)
+            ceiling = floorUnderside;
+        if (underside >= minimumHeight && underside < ceiling)
             ceiling = underside;
     }
     return ceiling;

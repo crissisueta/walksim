@@ -90,6 +90,8 @@ int main(int argc, char **argv)
                 City_Draw(buildingDebug);
             EndMode3D();
 
+            if (buildingDebug) City_DrawDebugLabels(cam);
+
             DrawText(TextFormat("seed %u   %d settlements   %d large structures   %d fps",
                                  seed, City_Count(), City_LargeBuildingCount(), GetFPS()),
                      10, 10, 20, WHITE);
