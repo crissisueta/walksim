@@ -2,6 +2,16 @@
 #include "raylib.h"
 #include <vector>
 
+// A procedural building is a graph of axis-aligned local room modules. Room
+// transforms are evaluated relative to Building::position before rendering.
+// A visual column from the terrain to the underside of a room floor. Supports
+// deliberately do not participate in collision; the player can pass through them.
+struct BuildingSupport {
+    Vector3 position;
+    float height;
+    float width;
+};
+
 enum BuildingType {
     BUILDING_GENERIC
 };
@@ -21,6 +31,7 @@ enum SocketType {
 };
 
 struct Socket {
+    // Local doorway/boundary midpoint and its outward-facing rotation.
     Vector3 position;
     float rotation;
     SocketType type;
@@ -32,10 +43,12 @@ struct Room {
     float rotation;
     int width;
     int depth;
+    float height;
     std::vector<Socket> sockets;
 };
 
 struct BuildingConnection {
+    // The paired sockets occupy the same boundary and form one passage.
     int roomA;
     int socketA;
     int roomB;
@@ -50,11 +63,26 @@ struct Building {
     int exteriorSocket;
     std::vector<Room> rooms;
     std::vector<BuildingConnection> connections;
+    std::vector<BuildingSupport> supports;
 };
 
 Building Building_GenerateTestBuilding(unsigned int seed);
+// Loads definitions in the simple [room_type] key=value format. A failed load
+// leaves the built-in definitions active, so generation always remains usable.
+bool Building_LoadRoomDefinitions(const char *path);
+// Call after position and terrain pads are final. This samples terrain once and
+// stores the resulting visual supports in the building instance.
+void Building_GenerateSupports(Building *building);
+// Checks grid alignment, overlap, socket pairing, and graph connectivity.
 bool Building_ValidatePlan(const Building &building);
+// Rendering and collision consume the generated plan; neither changes it.
 void Building_Draw(const Building &building, bool debug);
 bool Building_Collides(const Building &building, float x, float z,
                        float radius, float feetY, float height);
+// Returns the walkable floor above currentGround, if this point is in a room.
+float Building_FloorHeight(const Building &building, float x, float z,
+                           float currentGround);
+// Returns the nearest ceiling above minimumHeight, or FLT_MAX if none exists.
+float Building_CeilingHeight(const Building &building, float x, float z,
+                             float minimumHeight);
 const char *Building_ModuleAssetPath(RoomType type);

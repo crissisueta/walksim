@@ -1,6 +1,8 @@
 #include "terrain.h"
 #include <math.h>
 
+// Terrain height is evaluated analytically for gameplay and sampled into a
+// mesh only for rendering, keeping both representations in agreement.
 static unsigned int g_seed = 0;
 
 // Pads are registered by city generation before the terrain mesh is built.

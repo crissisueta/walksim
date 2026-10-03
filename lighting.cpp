@@ -1,5 +1,6 @@
 #include "lighting.h"
 
+// The lighting shader is kept in source to avoid an external runtime asset.
 // Same sun and ambient as GrassColor() in terrain.cpp, so models match the hills.
 
 static const char *VS = R"(#version 330

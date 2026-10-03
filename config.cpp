@@ -2,13 +2,78 @@
 #include "terrain.h"
 #include "player.h"
 #include "raylib.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
+// Settings use a deliberately small immediate-mode interface and a tolerant
+// text format, making values easy to inspect and hand-edit between sessions.
 // ---------------------------------------------------------------------------
 // Tiny immediate-mode UI: a slider is just a function you call every frame.
 // ---------------------------------------------------------------------------
 
 static int g_nextId = 0;    // reset every frame; gives each slider a stable id
 static int g_active = -1;   // id of the slider being dragged, or -1
+static bool g_settingsChanged = false;
+
+static bool ParseFloat(const char *text, float *value, float minimum, float maximum)
+{
+    char *end = NULL;
+    float parsed = strtof(text, &end);
+    while (end && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) end++;
+    if (end == text || (end && *end) || parsed < minimum || parsed > maximum) return false;
+    *value = parsed;
+    return true;
+}
+
+static bool ParseBool(const char *text, bool *value)
+{
+    if (strcmp(text, "1") == 0 || strcmp(text, "true") == 0) { *value = true; return true; }
+    if (strcmp(text, "0") == 0 || strcmp(text, "false") == 0) { *value = false; return true; }
+    return false;
+}
+
+void Config_Load(bool *panelOpen, bool *buildingDebug)
+{
+    FILE *file = fopen("settings.cfg", "r");
+    if (!file) return; // Current runtime defaults remain in effect.
+
+    char line[160];
+    while (fgets(line, sizeof(line), file)) {
+        char key[64], value[80];
+        if (sscanf(line, " %63[^=]=%79s", key, value) != 2) continue;
+        if (strcmp(key, "panel_open") == 0) ParseBool(value, panelOpen);
+        else if (strcmp(key, "building_debug") == 0) ParseBool(value, buildingDebug);
+        else if (strcmp(key, "walk_speed") == 0) ParseFloat(value, &g_playerParams.walkSpeed, 1.0f, 30.0f);
+        else if (strcmp(key, "sprint_speed") == 0) ParseFloat(value, &g_playerParams.sprintSpeed, 2.0f, 60.0f);
+        else for (int i = 0; i < 3; i++) {
+            char expected[32];
+            snprintf(expected, sizeof(expected), "terrain_amp_%d", i);
+            if (strcmp(key, expected) == 0) { ParseFloat(value, &g_terrainParams.amp[i], 0.0f, i == 0 ? 60.0f : i == 1 ? 30.0f : 5.0f); break; }
+            snprintf(expected, sizeof(expected), "terrain_wavelength_%d", i);
+            if (strcmp(key, expected) == 0) { ParseFloat(value, &g_terrainParams.wavelength[i], i == 0 ? 80.0f : i == 1 ? 30.0f : 8.0f, i == 0 ? 600.0f : i == 1 ? 250.0f : 80.0f); break; }
+            snprintf(expected, sizeof(expected), "terrain_valley_%d", i);
+            if (strcmp(key, expected) == 0) { ParseFloat(value, &g_terrainParams.valley[i], 0.0f, 255.0f); break; }
+            snprintf(expected, sizeof(expected), "terrain_hill_%d", i);
+            if (strcmp(key, expected) == 0) { ParseFloat(value, &g_terrainParams.hill[i], 0.0f, 255.0f); break; }
+        }
+    }
+    fclose(file);
+}
+
+void Config_Save(bool panelOpen, bool buildingDebug)
+{
+    FILE *file = fopen("settings.cfg", "w");
+    if (!file) return;
+    fprintf(file, "# walksim settings (missing or invalid values use defaults)\n");
+    fprintf(file, "panel_open=%s\nbuilding_debug=%s\n", panelOpen ? "true" : "false", buildingDebug ? "true" : "false");
+    fprintf(file, "walk_speed=%.3f\nsprint_speed=%.3f\n", g_playerParams.walkSpeed, g_playerParams.sprintSpeed);
+    for (int i = 0; i < 3; i++) {
+        fprintf(file, "terrain_amp_%d=%.3f\nterrain_wavelength_%d=%.3f\n", i, g_terrainParams.amp[i], i, g_terrainParams.wavelength[i]);
+        fprintf(file, "terrain_valley_%d=%.3f\nterrain_hill_%d=%.3f\n", i, g_terrainParams.valley[i], i, g_terrainParams.hill[i]);
+    }
+    fclose(file);
+}
 
 // Draws one slider and updates *value while it's dragged. Returns true if the value changed.
 static bool Slider(const char *label, float *value, float lo, float hi, int decimals,
@@ -111,9 +176,9 @@ bool Config_Draw(void)
     // --- Player ---
     Heading("Player", x, y);
     y += 22;
-    Slider("Walk speed (m/s)",   &g_playerParams.walkSpeed,   1.0f, 30.0f, 1, x, y, w);
+    if (Slider("Walk speed (m/s)", &g_playerParams.walkSpeed, 1.0f, 30.0f, 1, x, y, w)) g_settingsChanged = true;
     y += 30;
-    Slider("Sprint speed (m/s)", &g_playerParams.sprintSpeed, 2.0f, 60.0f, 1, x, y, w);
+    if (Slider("Sprint speed (m/s)", &g_playerParams.sprintSpeed, 2.0f, 60.0f, 1, x, y, w)) g_settingsChanged = true;
     y += 40;
 
     // --- Reset button ---
@@ -125,7 +190,16 @@ bool Config_Draw(void)
         Terrain_ResetParams();
         Player_ResetParams();
         terrainChanged = true;
+        g_settingsChanged = true;
     }
 
+    if (terrainChanged) g_settingsChanged = true;
     return terrainChanged;
+}
+
+bool Config_ConsumeChanged(void)
+{
+    bool changed = g_settingsChanged;
+    g_settingsChanged = false;
+    return changed;
 }

@@ -22,6 +22,8 @@ void  Terrain_Init(unsigned int seed);   // call once, before anything else
 float Terrain_BaseHeight(float x, float z); // natural terrain, without building pads
 float Terrain_Height(float x, float z);  // ground height at world (x, z)
 void  Terrain_ClearPads(void);            // remove all local building terrain edits
+// Registers a flat rectangular foundation. blendWidth softly transitions it
+// back into natural terrain; pads must be added before Terrain_BuildModel().
 void  Terrain_AddBuildingPad(float x, float z, float halfWidth, float halfDepth,
                              float height, float blendWidth);
 Model Terrain_BuildModel(void);          // after params change: UnloadModel, then call this again

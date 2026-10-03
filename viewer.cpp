@@ -6,6 +6,7 @@
 #include "rlgl.h"
 #include <math.h>
 
+// Standalone inspection mode for checking imported models before city use.
 static bool LoadInto(Model *model, const char *path, Shader shader)
 {
     *model = LoadModel(path);

@@ -2,8 +2,11 @@
 #include "terrain.h"
 #include "building.h"
 #include "lighting.h"
+#include <float.h>
 #include <math.h>
 
+// City generation chooses deterministic locations, installs terrain pads, then
+// places procedural plans. Terrain-dependent support data is finalized last.
 static const int CITY_LIMIT = 5;
 static const int BUILDING_LIMIT = 20;
 static const int MODEL_LIMIT = 3;
@@ -120,8 +123,10 @@ static void LargeBuildingPad(const Building &building, float *halfWidth, float *
         if (i == 0 || roomMinZ < minZ) minZ = roomMinZ;
         if (i == 0 || roomMaxZ > maxZ) maxZ = roomMaxZ;
     }
-    *halfWidth = (maxX - minX) * 0.5f + 0.35f;
-    *halfDepth = (maxZ - minZ) * 0.5f + 0.35f;
+    // Keep a small flat apron beyond the complete room footprint. Supports
+    // handle any remaining terrain transition rather than enlarging this pad.
+    *halfWidth = (maxX - minX) * 0.5f + 0.50f;
+    *halfDepth = (maxZ - minZ) * 0.5f + 0.50f;
 }
 
 static float LargeBuildingFoundationHeight(float x, float z, float halfWidth, float halfDepth)
@@ -277,11 +282,7 @@ static void LoadBuildingModels(void)
 
 static void GenerateBuildings(City *city)
 {
-    static const Color palette[] = {
-        { 232, 232, 226, 255 }, { 213, 216, 216, 255 },
-        { 195, 200, 202, 255 }, { 242, 239, 230, 255 }
-    };
-    const int wanted = 14 + (int)(Random01() * 7.0f);
+    const int wanted = LARGE_BUILDING_LIMIT;
     city->buildingCount = 0;
     city->largeBuildingCount = 0;
 
@@ -293,55 +294,27 @@ static void GenerateBuildings(City *city)
         float z = city->position.y + sinf(angle) * distance;
         if (TerrainSlope(x, z) > 0.28f) continue;
 
-        bool largeStructure = Random01() < 0.15f;
-        if (g_modelCount == 0 && city->largeBuildingCount == 0) largeStructure = true;
-        if (city->largeBuildingCount >= LARGE_BUILDING_LIMIT) largeStructure = false;
-
         bool spaced = true;
-        for (int i = 0; i < city->buildingCount; i++) {
-            const CityBuilding &other = city->buildings[i];
-            float minimumDistance = largeStructure ? 36.0f : 15.5f;
-            if (Distance(x, z, other.position.x, other.position.z) < minimumDistance) {
-                spaced = false;
-                break;
-            }
-        }
-        for (int i = 0; spaced && i < city->largeBuildingCount; i++) {
+        for (int i = 0; i < city->largeBuildingCount; i++) {
             const LargeBuildingInstance &other = city->largeBuildings[i];
-            float minimumDistance = largeStructure ? 55.0f : 36.0f;
-            if (Distance(x, z, other.position.x, other.position.z) < minimumDistance)
+            if (Distance(x, z, other.position.x, other.position.z) < 55.0f)
                 spaced = false;
         }
         if (!spaced) continue;
 
-        if (largeStructure) {
-            const float worldLimit = TERRAIN_SIZE * 0.5f - 5.0f;
-            if (fabsf(x) + 35.0f > worldLimit || fabsf(z) + 35.0f > worldLimit) continue;
-            unsigned int buildingSeed = DeriveSeed(city->seed,
-                                                   (unsigned int)city->largeBuildingCount + 1u);
-            LargeBuildingInstance &building = city->largeBuildings[city->largeBuildingCount++];
-            building.plan = Building_GenerateTestBuilding(buildingSeed);
-            float halfWidth, halfDepth;
-            LargeBuildingPad(building.plan, &halfWidth, &halfDepth);
-            float foundationY = LargeBuildingFoundationHeight(x, z, halfWidth, halfDepth);
-            Terrain_AddBuildingPad(x, z, halfWidth, halfDepth, foundationY, 8.0f);
-            building.position = Vector3{ x, foundationY, z };
-            building.plan.position = building.position;
-            continue;
-        }
-        if (g_modelCount == 0) continue;
-
-        CityBuilding &building = city->buildings[city->buildingCount++];
-        building.model = (int)(Random01() * g_modelCount);
-        building.scale = RandomRange(0.85f, 1.2f);
-        building.rotation = RandomRange(0.0f, 360.0f);
-        building.groundY = Terrain_Height(x, z);
-        building.position = Vector3{
-            x,
-            building.groundY - g_modelBaseY[building.model] * building.scale,
-            z
-        };
-        building.tint = palette[(int)(Random01() * (sizeof(palette) / sizeof(palette[0])))];
+        const float worldLimit = TERRAIN_SIZE * 0.5f - 5.0f;
+        if (fabsf(x) + 35.0f > worldLimit || fabsf(z) + 35.0f > worldLimit) continue;
+        unsigned int buildingSeed = DeriveSeed(city->seed,
+                                               (unsigned int)city->largeBuildingCount + 1u);
+        LargeBuildingInstance &building = city->largeBuildings[city->largeBuildingCount++];
+        building.plan = Building_GenerateTestBuilding(buildingSeed);
+        float halfWidth, halfDepth;
+        LargeBuildingPad(building.plan, &halfWidth, &halfDepth);
+        float foundationY = LargeBuildingFoundationHeight(x, z, halfWidth, halfDepth);
+        Terrain_AddBuildingPad(x, z, halfWidth, halfDepth, foundationY, 8.0f);
+        building.position = Vector3{ x, foundationY, z };
+        building.plan.position = building.position;
+        Building_GenerateSupports(&building.plan);
     }
 }
 
@@ -459,6 +432,31 @@ bool City_Collides(float x, float z, float radius, float feetY, float height)
         }
     }
     return false;
+}
+
+float City_GroundHeight(float x, float z, float terrainHeight)
+{
+    float ground = terrainHeight;
+    for (int i = 0; i < g_cityCount; i++) {
+        const City &city = g_cities[i];
+        for (int j = 0; j < city.largeBuildingCount; j++)
+            ground = Building_FloorHeight(city.largeBuildings[j].plan, x, z, ground);
+    }
+    return ground;
+}
+
+float City_CeilingHeight(float x, float z, float minimumHeight)
+{
+    float ceiling = FLT_MAX;
+    for (int i = 0; i < g_cityCount; i++) {
+        const City &city = g_cities[i];
+        for (int j = 0; j < city.largeBuildingCount; j++) {
+            float candidate = Building_CeilingHeight(city.largeBuildings[j].plan, x, z,
+                                                      minimumHeight);
+            if (candidate < ceiling) ceiling = candidate;
+        }
+    }
+    return ceiling;
 }
 
 void City_Unload(void)

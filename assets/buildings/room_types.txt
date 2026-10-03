@@ -1,0 +1,35 @@
+# walksim procedural room templates
+#
+# Each required section maps directly to one existing RoomType. Dimensions are
+# in metres. socket controls which existing doorway category the room exposes.
+# Keep width and depth aligned to the 2.5 m building grid for predictable plans.
+
+[entrance]
+width=10
+depth=10
+height=3
+socket=door
+
+[hallway]
+width=5
+depth=10
+height=3
+socket=corridor
+
+[room]
+width=10
+depth=10
+height=3
+socket=door
+
+[bathroom]
+width=5
+depth=5
+height=3
+socket=door
+
+[hallway2]
+width=13
+depth=10
+height=3
+socket=corridor

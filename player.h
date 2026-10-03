@@ -16,8 +16,8 @@ struct PlayerParams {
 };
 extern PlayerParams g_playerParams;
 
-void     Player_ResetParams(void);
+void     Player_ResetParams(void); // restore movement tuning without moving player
 void     Player_Init(Player *p, float x, float z);
 // controls=false ignores mouse and keyboard (gravity and ground following still run).
 void     Player_Update(Player *p, float dt, bool controls);
-Camera3D Player_GetCamera(const Player *p);
+Camera3D Player_GetCamera(const Player *p); // first-person camera from feet + eye height

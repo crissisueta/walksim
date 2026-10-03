@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Application lifecycle: initialize world services, run the frame loop, then
+// release GPU resources in the reverse order of their dependencies.
 int main(int argc, char **argv)
 {
     // World seed:   ./game 839271
@@ -39,6 +41,8 @@ int main(int argc, char **argv)
 
     bool panelOpen       = false;  // Tab toggles the settings panel
     bool buildingDebug   = false;
+    Config_Load(&panelOpen, &buildingDebug);
+    if (panelOpen) EnableCursor();
     bool rebuildTerrain  = false;  // set by the panel when a terrain setting changes
     int  skipMouseFrames = 2;      // ignore the mouse briefly after capturing it (avoids a view jump)
 
@@ -54,8 +58,12 @@ int main(int argc, char **argv)
                 DisableCursor();            // back to mouse look
                 skipMouseFrames = 2;
             }
+            Config_Save(panelOpen, buildingDebug);
         }
-        if (IsKeyPressed(KEY_F3)) buildingDebug = !buildingDebug;
+        if (IsKeyPressed(KEY_F3)) {
+            buildingDebug = !buildingDebug;
+            Config_Save(panelOpen, buildingDebug);
+        }
 
         if (rebuildTerrain) {
             City_Generate(seed);
@@ -91,6 +99,7 @@ int main(int argc, char **argv)
                 DrawText(TextFormat("M3 debug   first building seed %u",
                                     City_FirstLargeBuildingSeed()), 10, 54, 16, WHITE);
             if (panelOpen && Config_Draw()) rebuildTerrain = true;
+            if (Config_ConsumeChanged()) Config_Save(panelOpen, buildingDebug);
         EndDrawing();
     }
 

@@ -1,18 +1,219 @@
 #include "building.h"
+#include "terrain.h"
+#include <float.h>
 #include <math.h>
+#include <stdio.h>
+#include <algorithm>
+#include <ctype.h>
+#include <stdlib.h>
+#include <string.h>
 
+// This module owns the deterministic room-plan generator and all geometry
+// derived from it. The support pass is deliberately separate from topology.
 static const float GRID_SIZE = 2.5f;
-static const float MODULE_HEIGHT = 3.0f;
 static const float WALL_THICKNESS = 0.2f;
+static const float FLOOR_THICKNESS = 0.16f;
+static const float CEILING_THICKNESS = 0.16f;
 static const float DOOR_WIDTH = 1.6f;
 static const float DOOR_HEIGHT = 2.2f;
 static const float BUILDING_LIMIT = 35.0f;
+static const int WALL_PIECE_LIMIT = 24;
+static const float BUILDING_SUPPORT_MIN_HEIGHT = 0.25f;
+static const float BUILDING_SUPPORT_DUPLICATE_DISTANCE = 0.75f;
+static const float BUILDING_SUPPORT_WIDTH = 0.35f;
+
+// Room templates intentionally use a tiny INI-like format instead of a
+// general serialization system. The generator only needs dimensions and the
+// socket category; socket positions are still derived from the room rectangle.
+struct RoomDefinition {
+    int width;
+    int depth;
+    float height;
+    SocketType socketType;
+};
+
+static const int ROOM_TYPE_COUNT = 4;
+static RoomDefinition g_roomDefinitions[ROOM_TYPE_COUNT];
+static bool g_roomDefinitionsInitialized = false;
+
+static const char *RoomTypeName(RoomType type)
+{
+    switch (type) {
+        case ROOM_ENTRANCE: return "entrance";
+        case ROOM_HALLWAY: return "hallway";
+        case ROOM_ROOM: return "room";
+        case ROOM_BATHROOM: return "bathroom";
+        default: return "unknown";
+    }
+}
+
+static int RoomTypeFromName(const char *name)
+{
+    for (int type = 0; type < ROOM_TYPE_COUNT; type++)
+        if (strcmp(name, RoomTypeName((RoomType)type)) == 0) return type;
+    return -1;
+}
+
+static void SetDefaultRoomDefinitions(RoomDefinition *definitions)
+{
+    definitions[ROOM_ENTRANCE] = RoomDefinition{ 10, 10, 3.0f, SOCKET_DOOR };
+    definitions[ROOM_HALLWAY] = RoomDefinition{ 5, 10, 3.0f, SOCKET_CORRIDOR };
+    definitions[ROOM_ROOM] = RoomDefinition{ 10, 10, 3.0f, SOCKET_DOOR };
+    definitions[ROOM_BATHROOM] = RoomDefinition{ 5, 5, 3.0f, SOCKET_DOOR };
+}
+
+static char *Trim(char *text)
+{
+    while (*text && isspace((unsigned char)*text)) text++;
+    char *end = text + strlen(text);
+    while (end > text && isspace((unsigned char)end[-1])) *--end = '\0';
+    return text;
+}
+
+static bool ParsePositiveInteger(const char *text, int *value)
+{
+    char *end = NULL;
+    long parsed = strtol(text, &end, 10);
+    if (!end || *Trim(end) || parsed <= 0 || parsed > 1000) return false;
+    *value = (int)parsed;
+    return true;
+}
+
+static bool ParsePositiveFloat(const char *text, float *value)
+{
+    char *end = NULL;
+    float parsed = strtof(text, &end);
+    if (!end || *Trim(end) || parsed <= 0.0f || parsed > 1000.0f) return false;
+    *value = parsed;
+    return true;
+}
+
+bool Building_LoadRoomDefinitions(const char *path)
+{
+    RoomDefinition definitions[ROOM_TYPE_COUNT];
+    SetDefaultRoomDefinitions(definitions);
+    FILE *file = fopen(path, "r");
+    if (!file) {
+        fprintf(stderr, "Building definitions: could not open %s; using built-in defaults.\n", path);
+        g_roomDefinitionsInitialized = true;
+        SetDefaultRoomDefinitions(g_roomDefinitions);
+        return false;
+    }
+
+    int fields[ROOM_TYPE_COUNT] = {};
+    int currentType = -1;
+    int lineNumber = 0;
+    char line[256];
+    bool valid = true;
+    while (fgets(line, sizeof(line), file)) {
+        lineNumber++;
+        char *comment = strchr(line, '#');
+        if (comment) *comment = '\0';
+        char *text = Trim(line);
+        if (!*text) continue;
+
+        size_t length = strlen(text);
+        if (text[0] == '[' && length > 2 && text[length - 1] == ']') {
+            text[length - 1] = '\0';
+            currentType = RoomTypeFromName(Trim(text + 1));
+            if (currentType < 0) {
+                fprintf(stderr, "Building definitions:%d: unknown room type '%s'.\n", lineNumber, text + 1);
+                valid = false;
+            }
+            continue;
+        }
+
+        char *equals = strchr(text, '=');
+        if (currentType < 0 || !equals) {
+            fprintf(stderr, "Building definitions:%d: expected [room_type] or key=value.\n", lineNumber);
+            valid = false;
+            continue;
+        }
+        *equals = '\0';
+        char *key = Trim(text);
+        char *value = Trim(equals + 1);
+        bool parsed = false;
+        if (strcmp(key, "width") == 0) {
+            parsed = ParsePositiveInteger(value, &definitions[currentType].width);
+            fields[currentType] |= 1;
+        } else if (strcmp(key, "depth") == 0) {
+            parsed = ParsePositiveInteger(value, &definitions[currentType].depth);
+            fields[currentType] |= 2;
+        } else if (strcmp(key, "height") == 0) {
+            parsed = ParsePositiveFloat(value, &definitions[currentType].height);
+            fields[currentType] |= 4;
+        } else if (strcmp(key, "socket") == 0) {
+            if (strcmp(value, "door") == 0) definitions[currentType].socketType = SOCKET_DOOR;
+            else if (strcmp(value, "corridor") == 0) definitions[currentType].socketType = SOCKET_CORRIDOR;
+            else {
+                fprintf(stderr, "Building definitions:%d: socket must be door or corridor.\n", lineNumber);
+                valid = false;
+                continue;
+            }
+            parsed = true;
+            fields[currentType] |= 8;
+        } else {
+            fprintf(stderr, "Building definitions:%d: unknown key '%s'.\n", lineNumber, key);
+            valid = false;
+            continue;
+        }
+        if (!parsed) {
+            fprintf(stderr, "Building definitions:%d: invalid %s value '%s'.\n", lineNumber, key, value);
+            valid = false;
+        }
+    }
+    fclose(file);
+
+    for (int type = 0; type < ROOM_TYPE_COUNT; type++) {
+        if (fields[type] != 15) {
+            fprintf(stderr, "Building definitions: [%s] must define width, depth, height, and socket.\n",
+                    RoomTypeName((RoomType)type));
+            valid = false;
+        }
+    }
+    g_roomDefinitionsInitialized = true;
+    if (!valid) {
+        fprintf(stderr, "Building definitions: using built-in defaults because %s is invalid.\n", path);
+        SetDefaultRoomDefinitions(g_roomDefinitions);
+        return false;
+    }
+    memcpy(g_roomDefinitions, definitions, sizeof(g_roomDefinitions));
+    return true;
+}
+
+static void EnsureRoomDefinitionsLoaded(void)
+{
+    if (!g_roomDefinitionsInitialized)
+        Building_LoadRoomDefinitions("assets/buildings/room_types.txt");
+}
 
 struct WallPiece {
     Vector3 first;
     Vector3 second;
     float minY;
     float maxY;
+};
+
+enum DebugGeometryType {
+    DEBUG_WALL,
+    DEBUG_FRAME_JAMB,
+    DEBUG_FRAME_HEADER,
+    DEBUG_FLOOR,
+    DEBUG_CEILING
+};
+
+struct DebugGeometry {
+    BoundingBox bounds;
+    DebugGeometryType type;
+    int roomIndex;
+    int pieceIndex;
+};
+
+struct BoundaryInterval {
+    float first;
+    float second;
+    int peerRoom;
+    int peerSocket;
 };
 
 static unsigned int NextRandom(unsigned int *state)
@@ -42,14 +243,26 @@ static Vector3 RoomToBuilding(const Room &room, Vector3 point)
 
 static int RoomWidth(RoomType type)
 {
-    if (type == ROOM_HALLWAY || type == ROOM_BATHROOM) return 5;
-    return 10;
+    EnsureRoomDefinitionsLoaded();
+    return g_roomDefinitions[type].width;
 }
 
 static int RoomDepth(RoomType type)
 {
-    if (type == ROOM_BATHROOM) return 5;
-    return 10;
+    EnsureRoomDefinitionsLoaded();
+    return g_roomDefinitions[type].depth;
+}
+
+static float RoomHeight(RoomType type)
+{
+    EnsureRoomDefinitionsLoaded();
+    return g_roomDefinitions[type].height;
+}
+
+static SocketType RoomSocketType(RoomType type)
+{
+    EnsureRoomDefinitionsLoaded();
+    return g_roomDefinitions[type].socketType;
 }
 
 static Room MakeRoom(RoomType type, Vector3 position, float rotation)
@@ -60,7 +273,8 @@ static Room MakeRoom(RoomType type, Vector3 position, float rotation)
     room.rotation = rotation;
     room.width = RoomWidth(type);
     room.depth = RoomDepth(type);
-    SocketType socketType = type == ROOM_HALLWAY ? SOCKET_CORRIDOR : SOCKET_DOOR;
+    room.height = RoomHeight(type);
+    SocketType socketType = RoomSocketType(type);
     room.sockets.push_back(Socket{ Vector3{ 0.0f, 1.2f, room.depth * 0.5f }, 0.0f, socketType });
     room.sockets.push_back(Socket{ Vector3{ 0.0f, 1.2f, -room.depth * 0.5f }, 180.0f, socketType });
     room.sockets.push_back(Socket{ Vector3{ room.width * 0.5f, 1.2f, 0.0f }, 90.0f, socketType });
@@ -162,6 +376,59 @@ static bool SocketIsOpen(const Building &building, int roomIndex, int socketInde
     return roomIndex == building.entranceRoom && socketIndex == building.exteriorSocket;
 }
 
+// Finds another module side on exactly the same boundary plane.  Connections
+// are the normal case, but this also handles two grid-aligned modules that
+// happen to touch without an explicit doorway connection.
+static int BoundaryPeer(const Building &building, int roomIndex, int socketIndex,
+                        int *peerSocket = NULL)
+{
+    Vector3 position = SocketPosition(building.rooms[roomIndex], socketIndex);
+    float direction = SocketDirection(building.rooms[roomIndex], socketIndex) * DEG2RAD;
+    for (size_t i = 0; i < building.connections.size(); i++) {
+        const BuildingConnection &connection = building.connections[i];
+        if (connection.roomA == roomIndex && connection.socketA == socketIndex) {
+            if (peerSocket) *peerSocket = connection.socketB;
+            return connection.roomB;
+        }
+        if (connection.roomB == roomIndex && connection.socketB == socketIndex) {
+            if (peerSocket) *peerSocket = connection.socketA;
+            return connection.roomA;
+        }
+    }
+    for (size_t otherIndex = 0; otherIndex < building.rooms.size(); otherIndex++) {
+        if ((int)otherIndex == roomIndex) continue;
+        const Room &other = building.rooms[otherIndex];
+        for (size_t otherSocket = 0; otherSocket < other.sockets.size(); otherSocket++) {
+            Vector3 otherPosition = SocketPosition(other, (int)otherSocket);
+            float dx = position.x - otherPosition.x;
+            float dz = position.z - otherPosition.z;
+            float otherDirection = SocketDirection(other, (int)otherSocket) * DEG2RAD;
+            if (dx * dx + dz * dz < 0.0001f &&
+                cosf(direction) * cosf(otherDirection) + sinf(direction) * sinf(otherDirection) < -0.999f)
+            {
+                if (peerSocket) *peerSocket = (int)otherSocket;
+                return (int)otherIndex;
+            }
+        }
+    }
+    return -1;
+}
+
+// Every shared plane has exactly one owner. Explicit connections retain their
+// generation direction; incidental touching boundaries use room index order.
+static bool SocketOwnsWall(const Building &building, int roomIndex, int socketIndex)
+{
+    if (roomIndex == building.entranceRoom && socketIndex == building.exteriorSocket) return true;
+    int peer = BoundaryPeer(building, roomIndex, socketIndex);
+    if (peer < 0) return true; // exterior wall
+    for (size_t i = 0; i < building.connections.size(); i++) {
+        const BuildingConnection &connection = building.connections[i];
+        if (connection.roomA == roomIndex && connection.socketA == socketIndex) return true;
+        if (connection.roomB == roomIndex && connection.socketB == socketIndex) return false;
+    }
+    return roomIndex < peer;
+}
+
 static void AddWallPiece(WallPiece *pieces, int *pieceCount, int side,
                          float edge, float first, float second,
                          float minY, float maxY)
@@ -180,6 +447,99 @@ static void AddWallPiece(WallPiece *pieces, int *pieceCount, int side,
     pieces[(*pieceCount)++] = piece;
 }
 
+static Vector3 SidePoint(const Room &room, int side, float along)
+{
+    float edge = side == 0 ? room.depth * 0.5f :
+                 side == 1 ? -room.depth * 0.5f :
+                 side == 2 ? room.width * 0.5f : -room.width * 0.5f;
+    return side < 2 ? RoomToBuilding(room, Vector3{ along, 0.0f, edge })
+                    : RoomToBuilding(room, Vector3{ edge, 0.0f, along });
+}
+
+static bool ConnectedBoundaryOwner(const Building &building, int roomIndex, int socketIndex,
+                                   int peerRoom, int peerSocket)
+{
+    for (size_t i = 0; i < building.connections.size(); i++) {
+        const BuildingConnection &connection = building.connections[i];
+        if (connection.roomA == roomIndex && connection.socketA == socketIndex &&
+            connection.roomB == peerRoom && connection.socketB == peerSocket) return true;
+        if (connection.roomB == roomIndex && connection.socketB == socketIndex &&
+            connection.roomA == peerRoom && connection.socketA == peerSocket) return false;
+    }
+    return roomIndex < peerRoom;
+}
+
+static bool IsOpenConnection(const Building &building, int roomIndex, int socketIndex,
+                             int peerRoom, int peerSocket)
+{
+    for (size_t i = 0; i < building.connections.size(); i++) {
+        const BuildingConnection &connection = building.connections[i];
+        if ((connection.roomA == roomIndex && connection.socketA == socketIndex &&
+             connection.roomB == peerRoom && connection.socketB == peerSocket) ||
+            (connection.roomB == roomIndex && connection.socketB == socketIndex &&
+             connection.roomA == peerRoom && connection.socketA == peerSocket)) return true;
+    }
+    return false;
+}
+
+static void CollectBoundaryIntervals(const Building &building, int roomIndex, int socketIndex,
+                                     std::vector<BoundaryInterval> *intervals)
+{
+    const Room &room = building.rooms[roomIndex];
+    float span = socketIndex < 2 ? (float)room.width : (float)room.depth;
+    Vector3 midpoint = SocketPosition(room, socketIndex);
+    float direction = SocketDirection(room, socketIndex) * DEG2RAD;
+    Vector3 normal = Vector3{ sinf(direction), 0.0f, cosf(direction) };
+    Vector3 origin = SidePoint(room, socketIndex, 0.0f);
+    Vector3 tangentEnd = SidePoint(room, socketIndex, 1.0f);
+    Vector3 tangent = Vector3{ tangentEnd.x - origin.x, 0.0f, tangentEnd.z - origin.z };
+
+    for (size_t peerRoom = 0; peerRoom < building.rooms.size(); peerRoom++) {
+        if ((int)peerRoom == roomIndex) continue;
+        const Room &other = building.rooms[peerRoom];
+        for (int peerSocket = 0; peerSocket < 4; peerSocket++) {
+            float peerDirection = SocketDirection(other, peerSocket) * DEG2RAD;
+            if (sinf(direction) * sinf(peerDirection) + cosf(direction) * cosf(peerDirection) > -0.999f)
+                continue;
+            Vector3 peerMidpoint = SocketPosition(other, peerSocket);
+            float planeDistance = (peerMidpoint.x - midpoint.x) * normal.x +
+                                  (peerMidpoint.z - midpoint.z) * normal.z;
+            if (fabsf(planeDistance) > 0.001f) continue;
+
+            float peerSpan = peerSocket < 2 ? (float)other.width : (float)other.depth;
+            Vector3 firstPoint = SidePoint(other, peerSocket, -peerSpan * 0.5f);
+            Vector3 secondPoint = SidePoint(other, peerSocket, peerSpan * 0.5f);
+            float first = (firstPoint.x - origin.x) * tangent.x +
+                          (firstPoint.z - origin.z) * tangent.z;
+            float second = (secondPoint.x - origin.x) * tangent.x +
+                           (secondPoint.z - origin.z) * tangent.z;
+            if (first > second) { float swap = first; first = second; second = swap; }
+            if (first < -span * 0.5f) first = -span * 0.5f;
+            if (second > span * 0.5f) second = span * 0.5f;
+            if (second - first > 0.01f)
+                intervals->push_back(BoundaryInterval{ first, second, (int)peerRoom, peerSocket });
+        }
+    }
+}
+
+static void AddBoundaryWallPieces(WallPiece *pieces, int *pieceCount, int side, float edge,
+                                  float first, float second, bool opening, float gap,
+                                  float roomHeight)
+{
+    if (!opening) {
+        AddWallPiece(pieces, pieceCount, side, edge, first, second,
+                     FLOOR_THICKNESS, roomHeight - CEILING_THICKNESS);
+        return;
+    }
+    AddWallPiece(pieces, pieceCount, side, edge, first, fminf(second, -gap * 0.5f),
+                 FLOOR_THICKNESS, roomHeight - CEILING_THICKNESS);
+    AddWallPiece(pieces, pieceCount, side, edge, fmaxf(first, gap * 0.5f), second,
+                 FLOOR_THICKNESS, roomHeight - CEILING_THICKNESS);
+    AddWallPiece(pieces, pieceCount, side, edge, fmaxf(first, -gap * 0.5f),
+                 fminf(second, gap * 0.5f), DOOR_HEIGHT,
+                 roomHeight - CEILING_THICKNESS);
+}
+
 static int RoomWallPieces(const Building &building, int roomIndex, WallPiece *pieces)
 {
     const Room &room = building.rooms[roomIndex];
@@ -189,19 +549,38 @@ static int RoomWallPieces(const Building &building, int roomIndex, WallPiece *pi
         float edge = side == 0 ? room.depth * 0.5f :
                      side == 1 ? -room.depth * 0.5f :
                      side == 2 ? room.width * 0.5f : -room.width * 0.5f;
-        bool open = SocketIsOpen(building, roomIndex, side);
         float gap = room.type == ROOM_BATHROOM ? 1.2f : DOOR_WIDTH;
-        if (!open) {
-            AddWallPiece(pieces, &pieceCount, side, edge, -span * 0.5f, span * 0.5f,
-                         0.0f, MODULE_HEIGHT);
-            continue;
+        std::vector<BoundaryInterval> intervals;
+        std::vector<float> cuts;
+        cuts.push_back(-span * 0.5f);
+        cuts.push_back(span * 0.5f);
+        CollectBoundaryIntervals(building, roomIndex, side, &intervals);
+        for (size_t i = 0; i < intervals.size(); i++) {
+            cuts.push_back(intervals[i].first);
+            cuts.push_back(intervals[i].second);
         }
-        AddWallPiece(pieces, &pieceCount, side, edge, -span * 0.5f, -gap * 0.5f,
-                     0.0f, MODULE_HEIGHT);
-        AddWallPiece(pieces, &pieceCount, side, edge, gap * 0.5f, span * 0.5f,
-                     0.0f, MODULE_HEIGHT);
-        AddWallPiece(pieces, &pieceCount, side, edge, -gap * 0.5f, gap * 0.5f,
-                     DOOR_HEIGHT, MODULE_HEIGHT);
+        std::sort(cuts.begin(), cuts.end());
+        for (size_t intervalIndex = 0; intervalIndex + 1 < cuts.size(); intervalIndex++) {
+            float first = cuts[intervalIndex];
+            float second = cuts[intervalIndex + 1];
+            if (second - first <= 0.01f) continue;
+            float midpoint = (first + second) * 0.5f;
+            const BoundaryInterval *peer = NULL;
+            for (size_t i = 0; i < intervals.size(); i++)
+                if (midpoint > intervals[i].first + 0.001f && midpoint < intervals[i].second - 0.001f) {
+                    peer = &intervals[i];
+                    break;
+                }
+
+            bool owner = peer == NULL || ConnectedBoundaryOwner(building, roomIndex, side,
+                                                                  peer->peerRoom, peer->peerSocket);
+            if (!owner) continue;
+            bool opening = peer ? IsOpenConnection(building, roomIndex, side,
+                                                    peer->peerRoom, peer->peerSocket)
+                                : (roomIndex == building.entranceRoom && side == building.exteriorSocket);
+            AddBoundaryWallPieces(pieces, &pieceCount, side, edge, first, second, opening, gap,
+                                  room.height);
+        }
     }
     return pieceCount;
 }
@@ -212,6 +591,58 @@ static Vector3 WorldPosition(const Building &building, const Room &room, Vector3
     return Vector3{ building.position.x + point.x,
                     building.position.y + point.y,
                     building.position.z + point.z };
+}
+
+void Building_GenerateSupports(Building *building)
+{
+    if (!building) return;
+
+    // Supports are derived data. Rebuilding them here is intentional when a
+    // city is regenerated after terrain settings change, but never per frame.
+    building->supports.clear();
+    for (size_t roomIndex = 0; roomIndex < building->rooms.size(); roomIndex++) {
+        const Room &room = building->rooms[roomIndex];
+        const float halfWidth = room.width * 0.5f;
+        const float halfDepth = room.depth * 0.5f;
+        const Vector3 corners[4] = {
+            Vector3{ -halfWidth, 0.0f, -halfDepth },
+            Vector3{  halfWidth, 0.0f, -halfDepth },
+            Vector3{  halfWidth, 0.0f,  halfDepth },
+            Vector3{ -halfWidth, 0.0f,  halfDepth }
+        };
+
+        for (int cornerIndex = 0; cornerIndex < 4; cornerIndex++) {
+            // RoomToBuilding is the authoritative room rotation transform.
+            // Using it prevents this code from drifting from room rendering.
+            Vector3 world = WorldPosition(*building, room, corners[cornerIndex]);
+            float terrainY = Terrain_Height(world.x, world.z);
+            // The room-local y coordinate is the floor underside; honoring it
+            // also keeps supports correct if modules gain vertical offsets.
+            float height = world.y - terrainY;
+            if (height <= BUILDING_SUPPORT_MIN_HEIGHT) continue;
+
+            bool duplicate = false;
+            for (size_t supportIndex = 0; supportIndex < building->supports.size(); supportIndex++) {
+                const BuildingSupport &support = building->supports[supportIndex];
+                float dx = support.position.x - world.x;
+                float dz = support.position.z - world.z;
+                if (dx * dx + dz * dz < BUILDING_SUPPORT_DUPLICATE_DISTANCE *
+                                            BUILDING_SUPPORT_DUPLICATE_DISTANCE) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) continue;
+
+            // The cube centre places its top at the floor underside and its
+            // bottom at the terrain sample, so there is no floating column.
+            building->supports.push_back(BuildingSupport{
+                Vector3{ world.x, terrainY + height * 0.5f, world.z },
+                height,
+                BUILDING_SUPPORT_WIDTH
+            });
+        }
+    }
 }
 
 static Color ShadeColor(Color color, float factor)
@@ -227,62 +658,182 @@ static Color ShadeColor(Color color, float factor)
 // Room rotations are constrained to right angles by Building_ValidatePlan().
 // Transforming dimensions this way keeps the primitive renderer simple while
 // allowing every room to use the same local-space drawing code.
-static void DrawRoomCube(const Building &building, const Room &room,
-                         Vector3 localCenter, Vector3 localSize, Color color)
+static Vector3 RoomCubeSize(const Room &room, Vector3 localSize)
 {
     float angle = room.rotation * DEG2RAD;
-    Vector3 size = Vector3{
+    return Vector3{
         fabsf(cosf(angle)) * localSize.x + fabsf(sinf(angle)) * localSize.z,
         localSize.y,
         fabsf(cosf(angle)) * localSize.z + fabsf(sinf(angle)) * localSize.x
     };
+}
+
+static BoundingBox RoomCubeBounds(const Building &building, const Room &room,
+                                  Vector3 localCenter, Vector3 localSize)
+{
+    Vector3 center = WorldPosition(building, room, localCenter);
+    Vector3 size = RoomCubeSize(room, localSize);
+    Vector3 half = Vector3{ size.x * 0.5f, size.y * 0.5f, size.z * 0.5f };
+    return BoundingBox{ Vector3{ center.x - half.x, center.y - half.y, center.z - half.z },
+                        Vector3{ center.x + half.x, center.y + half.y, center.z + half.z } };
+}
+
+static void DrawRoomCube(const Building &building, const Room &room,
+                         Vector3 localCenter, Vector3 localSize, Color color)
+{
+    Vector3 size = RoomCubeSize(room, localSize);
     DrawCubeV(WorldPosition(building, room, localCenter), size, color);
 }
 
-static void DrawDoorFrames(const Building &building, const Room &room, int roomIndex)
+static void AddDebugGeometry(std::vector<DebugGeometry> *geometry,
+                             const Building &building, const Room &room,
+                             Vector3 localCenter, Vector3 localSize,
+                             DebugGeometryType type, int roomIndex, int pieceIndex)
 {
+    if (!geometry) return;
+    geometry->push_back(DebugGeometry{
+        RoomCubeBounds(building, room, localCenter, localSize), type, roomIndex, pieceIndex
+    });
+}
+
+static Color DebugGeometryColor(DebugGeometryType type)
+{
+    switch (type) {
+        case DEBUG_WALL: return RED;
+        case DEBUG_FRAME_JAMB: return YELLOW;
+        case DEBUG_FRAME_HEADER: return ORANGE;
+        case DEBUG_FLOOR: return LIME;
+        default: return SKYBLUE;
+    }
+}
+
+static const char *DebugGeometryName(DebugGeometryType type)
+{
+    switch (type) {
+        case DEBUG_WALL: return "wall";
+        case DEBUG_FRAME_JAMB: return "frame-jamb";
+        case DEBUG_FRAME_HEADER: return "frame-header";
+        case DEBUG_FLOOR: return "floor";
+        default: return "ceiling";
+    }
+}
+
+static void ReportDebugIntersections(const Building &building,
+                                     const std::vector<DebugGeometry> &geometry)
+{
+    // Print each plan once while F3 debug is enabled. Face/edge contact is
+    // intentionally ignored; only a material three-dimensional overlap is reported.
+    static unsigned int reportedSeeds[32] = {};
+    static int reportedCount = 0;
+    for (int i = 0; i < reportedCount; i++) if (reportedSeeds[i] == building.seed) return;
+    if (reportedCount < 32) reportedSeeds[reportedCount++] = building.seed;
+
+    int overlaps = 0;
+    for (size_t a = 0; a < geometry.size(); a++) {
+        for (size_t b = a + 1; b < geometry.size(); b++) {
+            const BoundingBox &first = geometry[a].bounds;
+            const BoundingBox &second = geometry[b].bounds;
+            float overlapX = fminf(first.max.x, second.max.x) - fmaxf(first.min.x, second.min.x);
+            float overlapY = fminf(first.max.y, second.max.y) - fmaxf(first.min.y, second.min.y);
+            float overlapZ = fminf(first.max.z, second.max.z) - fmaxf(first.min.z, second.min.z);
+            if (overlapX <= 0.01f || overlapY <= 0.01f || overlapZ <= 0.01f ||
+                overlapX * overlapY * overlapZ <= 0.001f) continue;
+            if (geometry[a].type == DEBUG_WALL && geometry[b].type == DEBUG_WALL &&
+                overlapX <= WALL_THICKNESS + 0.001f && overlapZ <= WALL_THICKNESS + 0.001f)
+                continue; // Perpendicular wall-end contact, not duplicate wall volume.
+            printf("building %u overlap: %s room %d piece %d [%.2f %.2f %.2f]-[%.2f %.2f %.2f] "
+                   "with %s room %d piece %d [%.2f %.2f %.2f]-[%.2f %.2f %.2f] "
+                   "(%.3f x %.3f x %.3f)\n", building.seed,
+                   DebugGeometryName(geometry[a].type), geometry[a].roomIndex, geometry[a].pieceIndex,
+                   first.min.x, first.min.y, first.min.z, first.max.x, first.max.y, first.max.z,
+                   DebugGeometryName(geometry[b].type), geometry[b].roomIndex, geometry[b].pieceIndex,
+                   second.min.x, second.min.y, second.min.z, second.max.x, second.max.y, second.max.z,
+                   overlapX, overlapY, overlapZ);
+            overlaps++;
+        }
+    }
+    printf("building %u debug geometry: %d boxes, %d substantial overlaps\n",
+           building.seed, (int)geometry.size(), overlaps);
+    fflush(stdout);
+}
+
+static void DrawDoorFrames(const Building &building, const Room &room, int roomIndex,
+                           std::vector<DebugGeometry> *debugGeometry)
+{
+    const float frameWidth = 0.10f;
+    const float frameDepth = 0.08f;
+    const float frameClearance = 0.03f;
     const Color trim = Color{ 101, 83, 64, 255 };
-    const float gap = room.type == ROOM_BATHROOM ? 1.2f : DOOR_WIDTH;
+
     for (int side = 0; side < 4; side++) {
-        if (!SocketIsOpen(building, roomIndex, side)) continue;
+        if (!SocketIsOpen(building, roomIndex, side) ||
+            !SocketOwnsWall(building, roomIndex, side)) continue;
+
+        float gap = room.type == ROOM_BATHROOM ? 1.2f : DOOR_WIDTH;
+        float jambHeight = DOOR_HEIGHT - FLOOR_THICKNESS;
+        float jambY = FLOOR_THICKNESS + jambHeight * 0.5f;
         float edge = side == 0 ? room.depth * 0.5f :
                      side == 1 ? -room.depth * 0.5f :
                      side == 2 ? room.width * 0.5f : -room.width * 0.5f;
+        float inset = WALL_THICKNESS * 0.5f + frameClearance + frameDepth * 0.5f;
+
         if (side < 2) {
-            DrawRoomCube(building, room, Vector3{ -gap * 0.5f, DOOR_HEIGHT * 0.5f, edge },
-                         Vector3{ 0.12f, DOOR_HEIGHT, WALL_THICKNESS * 1.35f }, trim);
-            DrawRoomCube(building, room, Vector3{  gap * 0.5f, DOOR_HEIGHT * 0.5f, edge },
-                         Vector3{ 0.12f, DOOR_HEIGHT, WALL_THICKNESS * 1.35f }, trim);
-            DrawRoomCube(building, room, Vector3{ 0.0f, DOOR_HEIGHT, edge },
-                         Vector3{ gap + 0.18f, 0.12f, WALL_THICKNESS * 1.35f }, trim);
-            DrawRoomCube(building, room, Vector3{ 0.0f, 0.12f, edge },
-                         Vector3{ gap, 0.08f, 0.36f }, ShadeColor(trim, 0.72f));
+            float z = side == 0 ? edge - inset : edge + inset;
+            DrawRoomCube(building, room, Vector3{ -gap * 0.5f + frameWidth * 0.5f, jambY, z },
+                         Vector3{ frameWidth, jambHeight, frameDepth }, trim);
+            AddDebugGeometry(debugGeometry, building, room,
+                             Vector3{ -gap * 0.5f + frameWidth * 0.5f, jambY, z },
+                             Vector3{ frameWidth, jambHeight, frameDepth }, DEBUG_FRAME_JAMB, roomIndex, side * 3);
+            DrawRoomCube(building, room, Vector3{  gap * 0.5f - frameWidth * 0.5f, jambY, z },
+                         Vector3{ frameWidth, jambHeight, frameDepth }, trim);
+            AddDebugGeometry(debugGeometry, building, room,
+                             Vector3{ gap * 0.5f - frameWidth * 0.5f, jambY, z },
+                             Vector3{ frameWidth, jambHeight, frameDepth }, DEBUG_FRAME_JAMB, roomIndex, side * 3 + 1);
+            DrawRoomCube(building, room, Vector3{ 0.0f, DOOR_HEIGHT - frameWidth * 0.5f, z },
+                         Vector3{ gap - 2.0f * frameWidth, frameWidth, frameDepth }, trim);
+            AddDebugGeometry(debugGeometry, building, room,
+                             Vector3{ 0.0f, DOOR_HEIGHT - frameWidth * 0.5f, z },
+                             Vector3{ gap - 2.0f * frameWidth, frameWidth, frameDepth }, DEBUG_FRAME_HEADER, roomIndex, side * 3 + 2);
         } else {
-            DrawRoomCube(building, room, Vector3{ edge, DOOR_HEIGHT * 0.5f, -gap * 0.5f },
-                         Vector3{ WALL_THICKNESS * 1.35f, DOOR_HEIGHT, 0.12f }, trim);
-            DrawRoomCube(building, room, Vector3{ edge, DOOR_HEIGHT * 0.5f,  gap * 0.5f },
-                         Vector3{ WALL_THICKNESS * 1.35f, DOOR_HEIGHT, 0.12f }, trim);
-            DrawRoomCube(building, room, Vector3{ edge, DOOR_HEIGHT, 0.0f },
-                         Vector3{ WALL_THICKNESS * 1.35f, 0.12f, gap + 0.18f }, trim);
-            DrawRoomCube(building, room, Vector3{ edge, 0.12f, 0.0f },
-                         Vector3{ 0.36f, 0.08f, gap }, ShadeColor(trim, 0.72f));
+            float x = side == 2 ? edge - inset : edge + inset;
+            DrawRoomCube(building, room, Vector3{ x, jambY, -gap * 0.5f + frameWidth * 0.5f },
+                         Vector3{ frameDepth, jambHeight, frameWidth }, trim);
+            AddDebugGeometry(debugGeometry, building, room,
+                             Vector3{ x, jambY, -gap * 0.5f + frameWidth * 0.5f },
+                             Vector3{ frameDepth, jambHeight, frameWidth }, DEBUG_FRAME_JAMB, roomIndex, side * 3);
+            DrawRoomCube(building, room, Vector3{ x, jambY,  gap * 0.5f - frameWidth * 0.5f },
+                         Vector3{ frameDepth, jambHeight, frameWidth }, trim);
+            AddDebugGeometry(debugGeometry, building, room,
+                             Vector3{ x, jambY, gap * 0.5f - frameWidth * 0.5f },
+                             Vector3{ frameDepth, jambHeight, frameWidth }, DEBUG_FRAME_JAMB, roomIndex, side * 3 + 1);
+            DrawRoomCube(building, room, Vector3{ x, DOOR_HEIGHT - frameWidth * 0.5f, 0.0f },
+                         Vector3{ frameDepth, frameWidth, gap - 2.0f * frameWidth }, trim);
+            AddDebugGeometry(debugGeometry, building, room,
+                             Vector3{ x, DOOR_HEIGHT - frameWidth * 0.5f, 0.0f },
+                             Vector3{ frameDepth, frameWidth, gap - 2.0f * frameWidth }, DEBUG_FRAME_HEADER, roomIndex, side * 3 + 2);
         }
     }
 }
 
-static void DrawPlaceholderModule(const Building &building, const Room &room, int roomIndex)
+static void DrawPlaceholderModule(const Building &building, const Room &room, int roomIndex,
+                                  std::vector<DebugGeometry> *debugGeometry)
 {
     Color floorColor = room.type == ROOM_ENTRANCE ? Color{ 133, 121, 96, 255 } :
                        room.type == ROOM_HALLWAY ? Color{ 122, 133, 131, 255 } :
                        room.type == ROOM_BATHROOM ? Color{ 105, 147, 154, 255 } :
                        Color{ 145, 133, 112, 255 };
-    DrawRoomCube(building, room, Vector3{ 0.0f, 0.08f, 0.0f },
-                 Vector3{ (float)room.width, 0.16f, (float)room.depth }, floorColor);
-    DrawRoomCube(building, room, Vector3{ 0.0f, MODULE_HEIGHT - 0.08f, 0.0f },
-                 Vector3{ (float)room.width, 0.16f, (float)room.depth },
+    DrawRoomCube(building, room, Vector3{ 0.0f, FLOOR_THICKNESS * 0.5f, 0.0f },
+                 Vector3{ (float)room.width, FLOOR_THICKNESS, (float)room.depth }, floorColor);
+    AddDebugGeometry(debugGeometry, building, room, Vector3{ 0.0f, FLOOR_THICKNESS * 0.5f, 0.0f },
+                     Vector3{ (float)room.width, FLOOR_THICKNESS, (float)room.depth }, DEBUG_FLOOR, roomIndex, 0);
+    DrawRoomCube(building, room, Vector3{ 0.0f, room.height - CEILING_THICKNESS * 0.5f, 0.0f },
+                 Vector3{ (float)room.width, CEILING_THICKNESS, (float)room.depth },
                  Color{ 184, 184, 174, 255 });
+    AddDebugGeometry(debugGeometry, building, room,
+                     Vector3{ 0.0f, room.height - CEILING_THICKNESS * 0.5f, 0.0f },
+                     Vector3{ (float)room.width, CEILING_THICKNESS, (float)room.depth }, DEBUG_CEILING, roomIndex, 0);
 
-    WallPiece pieces[12];
+    WallPiece pieces[WALL_PIECE_LIMIT];
     int pieceCount = RoomWallPieces(building, roomIndex, pieces);
     for (int i = 0; i < pieceCount; i++) {
         const WallPiece &piece = pieces[i];
@@ -300,8 +851,11 @@ static void DrawPlaceholderModule(const Building &building, const Room &room, in
         DrawRoomCube(building, room, localCenter,
                      Vector3{ sizeX, piece.maxY - piece.minY, sizeZ },
                      ShadeColor(Color{ 214, 210, 197, 255 }, lightFacing));
+        AddDebugGeometry(debugGeometry, building, room, localCenter,
+                         Vector3{ sizeX, piece.maxY - piece.minY, sizeZ },
+                         DEBUG_WALL, roomIndex, i);
     }
-    DrawDoorFrames(building, room, roomIndex);
+    DrawDoorFrames(building, room, roomIndex, debugGeometry);
 }
 
 static float SegmentDistanceSquared(float x, float z, Vector3 a, Vector3 b)
@@ -360,6 +914,7 @@ bool Building_ValidatePlan(const Building &building)
     for (size_t i = 0; i < building.rooms.size(); i++) {
         const Room &room = building.rooms[i];
         if (room.width != RoomWidth(room.type) || room.depth != RoomDepth(room.type) ||
+            fabsf(room.height - RoomHeight(room.type)) > 0.001f ||
             !RoomInsideBounds(room)) return false;
         if (fabsf(room.position.x / GRID_SIZE - roundf(room.position.x / GRID_SIZE)) > 0.001f ||
             fabsf(room.position.z / GRID_SIZE - roundf(room.position.z / GRID_SIZE)) > 0.001f ||
@@ -420,9 +975,19 @@ bool Building_ValidatePlan(const Building &building)
 
 void Building_Draw(const Building &building, bool debug)
 {
+    // Supports are stored when the plan is placed, making drawing allocation-
+    // free and avoiding terrain-height samples in the render loop.
+    const Color supportColor = Color{ 104, 104, 98, 255 };
+    for (size_t supportIndex = 0; supportIndex < building.supports.size(); supportIndex++) {
+        const BuildingSupport &support = building.supports[supportIndex];
+        DrawCube(support.position, support.width, support.height, support.width, supportColor);
+    }
+
+    std::vector<DebugGeometry> debugGeometry;
     for (size_t roomIndex = 0; roomIndex < building.rooms.size(); roomIndex++) {
         const Room &room = building.rooms[roomIndex];
-        DrawPlaceholderModule(building, room, (int)roomIndex);
+        DrawPlaceholderModule(building, room, (int)roomIndex,
+                              debug ? &debugGeometry : NULL);
         if (!debug) continue;
 
         float angle = room.rotation * DEG2RAD;
@@ -431,7 +996,7 @@ void Building_Draw(const Building &building, bool debug)
         Vector3 minimum = Vector3{ building.position.x + room.position.x - halfWidth,
                                    building.position.y, building.position.z + room.position.z - halfDepth };
         Vector3 maximum = Vector3{ building.position.x + room.position.x + halfWidth,
-                                   building.position.y + MODULE_HEIGHT,
+                                   building.position.y + room.position.y + room.height,
                                    building.position.z + room.position.z + halfDepth };
         DrawBoundingBox(BoundingBox{ minimum, maximum }, YELLOW);
 
@@ -449,6 +1014,11 @@ void Building_Draw(const Building &building, bool debug)
             DrawLine3D(marker, end, color);
         }
     }
+    if (debug) {
+        for (size_t i = 0; i < debugGeometry.size(); i++)
+            DrawBoundingBox(debugGeometry[i].bounds, DebugGeometryColor(debugGeometry[i].type));
+        ReportDebugIntersections(building, debugGeometry);
+    }
 }
 
 bool Building_Collides(const Building &building, float x, float z,
@@ -456,7 +1026,7 @@ bool Building_Collides(const Building &building, float x, float z,
 {
     for (size_t roomIndex = 0; roomIndex < building.rooms.size(); roomIndex++) {
         const Room &room = building.rooms[roomIndex];
-        WallPiece pieces[12];
+        WallPiece pieces[WALL_PIECE_LIMIT];
         int pieceCount = RoomWallPieces(building, (int)roomIndex, pieces);
         for (int pieceIndex = 0; pieceIndex < pieceCount; pieceIndex++) {
             const WallPiece &piece = pieces[pieceIndex];
@@ -475,6 +1045,49 @@ bool Building_Collides(const Building &building, float x, float z,
         }
     }
     return false;
+}
+
+float Building_FloorHeight(const Building &building, float x, float z,
+                           float currentGround)
+{
+    float ground = currentGround;
+    for (size_t roomIndex = 0; roomIndex < building.rooms.size(); roomIndex++) {
+        const Room &room = building.rooms[roomIndex];
+        float worldX = x - building.position.x - room.position.x;
+        float worldZ = z - building.position.z - room.position.z;
+        float angle = room.rotation * DEG2RAD;
+
+        // Inverse of RoomToBuilding's horizontal rotation. The floor rectangle
+        // is the same local width/depth used by DrawPlaceholderModule().
+        float localX = worldX * cosf(angle) - worldZ * sinf(angle);
+        float localZ = worldX * sinf(angle) + worldZ * cosf(angle);
+        if (fabsf(localX) <= room.width * 0.5f &&
+            fabsf(localZ) <= room.depth * 0.5f) {
+            float floorTop = building.position.y + FLOOR_THICKNESS;
+            if (floorTop > ground) ground = floorTop;
+        }
+    }
+    return ground;
+}
+
+float Building_CeilingHeight(const Building &building, float x, float z,
+                             float minimumHeight)
+{
+    float ceiling = FLT_MAX;
+    for (size_t roomIndex = 0; roomIndex < building.rooms.size(); roomIndex++) {
+        const Room &room = building.rooms[roomIndex];
+        float worldX = x - building.position.x - room.position.x;
+        float worldZ = z - building.position.z - room.position.z;
+        float angle = room.rotation * DEG2RAD;
+        float localX = worldX * cosf(angle) - worldZ * sinf(angle);
+        float localZ = worldX * sinf(angle) + worldZ * cosf(angle);
+        float underside = building.position.y + room.position.y + room.height - CEILING_THICKNESS;
+        if (fabsf(localX) <= room.width * 0.5f &&
+            fabsf(localZ) <= room.depth * 0.5f &&
+            underside >= minimumHeight && underside < ceiling)
+            ceiling = underside;
+    }
+    return ceiling;
 }
 
 const char *Building_ModuleAssetPath(RoomType type)
