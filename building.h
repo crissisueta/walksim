@@ -76,6 +76,9 @@ struct Room {
     float width;
     float depth;
     float height;
+    // Zero-based story index. position.y is the slab underside elevation of
+    // this floor; rooms on the same floor always share position.y.
+    int floor;
     std::vector<Socket> sockets;
     std::vector<RoomWindow> windows;
 };
@@ -153,3 +156,6 @@ const char *Building_ModuleAssetPath(int templateId);
 // Guide-compatible alias and headless validation entry point.
 Building Building_Generate(unsigned int seed);
 int Building_RunSeedCheck(unsigned int count);
+// Headless gameplay test: walks a scripted player up and down every stair
+// link with the real movement physics. Returns the number of failed links.
+int Building_RunStairWalkCheck(unsigned int count);

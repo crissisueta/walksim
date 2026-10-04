@@ -51,4 +51,18 @@ width=15
 depth=10
 height=5
 socket=corridor
-weight=1
+weight=67
+
+# Stairwell module. The generator force-places it to build the vertical shaft
+# between floors; the small positive weight also lets stair rooms appear as
+# ordinary modules in graphs. height must be the tallest of all templates so
+# every floor stacks at exactly one stair rise (height = max template height).
+# Keep depth/width multiples of 5.
+# A shaft is a vertical run of aligned stairs rooms (same x, z, rotation).
+[stairs]
+width=5
+depth=10
+height=5
+socket=stairs
+weight=8
+role=stairs

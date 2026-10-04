@@ -7,6 +7,7 @@
 #include "config.h"
 #include "viewer.h"
 #include "lighting.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -17,12 +18,38 @@ int main(int argc, char **argv)
     // World seed:   ./game 839271
     // Model viewer: ./game --view assets/house_01.glb
     // Headless self-test: ./game --check 20000
+    // Headless plan dump:  ./game --seedinfo 13
+    // Headless stair walk: ./game --stairwalk 2000
     unsigned int seed = 839271;
     const char *viewPath = NULL;
     if (argc > 1 && strcmp(argv[1], "--check") == 0) {
         unsigned int count = argc > 2 ? (unsigned int)strtoul(argv[2], NULL, 10) : 20000u;
         int failures = Building_RunSeedCheck(count);
         return failures == 0 ? 0 : 1;
+    }
+    if (argc > 1 && strcmp(argv[1], "--stairwalk") == 0) {
+        unsigned int count = argc > 2 ? (unsigned int)strtoul(argv[2], NULL, 10) : 2000u;
+        int failures = Building_RunStairWalkCheck(count);
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc > 2 && strcmp(argv[1], "--seedinfo") == 0) {
+        unsigned int planSeed = (unsigned int)strtoul(argv[2], NULL, 10);
+        Building building = Building_Generate(planSeed);
+        bool valid = Building_ValidatePlan(building);
+        int floors = 1;
+        for (size_t i = 0; i < building.rooms.size(); i++)
+            if (building.rooms[i].floor + 1 > floors) floors = building.rooms[i].floor + 1;
+        printf("seed %u: valid %d rooms %zu floors %d connections %zu doors %zu\n",
+               planSeed, valid ? 1 : 0, building.rooms.size(), floors,
+               building.connections.size(), building.doors.size());
+        for (size_t i = 0; i < building.rooms.size(); i++) {
+            const Room &room = building.rooms[i];
+            printf("  room %zu: floor %d y %+.2f template '%s' pos (%.1f, %.1f) rot %.0f size %.0fx%.0fx%.0f\n",
+                   i, room.floor, room.position.y, Building_RoomName(room),
+                   room.position.x, room.position.z, room.rotation,
+                   room.width, room.depth, room.height);
+        }
+        return valid ? 0 : 1;
     }
     if (argc > 2 && strcmp(argv[1], "--view") == 0) viewPath = argv[2];
     else if (argc > 1) seed = (unsigned int)strtoul(argv[1], NULL, 10);
