@@ -8,6 +8,8 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
+#include <vector>
 
 // This module owns the deterministic room-plan generator and all geometry
 // derived from it. The support pass is deliberately separate from topology.
@@ -31,42 +33,48 @@ static const float DOOR_ANGULAR_SPEED = 220.0f;
 // Room templates intentionally use a tiny INI-like format instead of a
 // general serialization system. The generator only needs dimensions and the
 // socket category; socket positions are still derived from the room rectangle.
-struct RoomDefinition {
-    int width;
-    int depth;
-    float height;
-    SocketType socketType;
-    std::vector<RoomWindow> windows;
-};
-
-static const int ROOM_TYPE_COUNT = 4;
-static RoomDefinition g_roomDefinitions[ROOM_TYPE_COUNT];
+static std::vector<RoomDefinition> g_roomDefinitions;
 static bool g_roomDefinitionsInitialized = false;
 
-const char *Building_RoomTypeName(RoomType type)
+static void SetDefaultRoomDefinitions(std::vector<RoomDefinition> *definitions)
 {
-    switch (type) {
-        case ROOM_ENTRANCE: return "entrance";
-        case ROOM_HALLWAY: return "hallway";
-        case ROOM_ROOM: return "room";
-        case ROOM_BATHROOM: return "bathroom";
-        default: return "unknown";
-    }
-}
-
-static int RoomTypeFromName(const char *name)
-{
-    for (int type = 0; type < ROOM_TYPE_COUNT; type++)
-        if (strcmp(name, Building_RoomTypeName((RoomType)type)) == 0) return type;
-    return -1;
-}
-
-static void SetDefaultRoomDefinitions(RoomDefinition *definitions)
-{
-    definitions[ROOM_ENTRANCE] = RoomDefinition{ 10, 10, 3.0f, SOCKET_DOOR, std::vector<RoomWindow>() };
-    definitions[ROOM_HALLWAY] = RoomDefinition{ 5, 10, 3.0f, SOCKET_CORRIDOR, std::vector<RoomWindow>() };
-    definitions[ROOM_ROOM] = RoomDefinition{ 10, 10, 3.0f, SOCKET_DOOR, std::vector<RoomWindow>() };
-    definitions[ROOM_BATHROOM] = RoomDefinition{ 5, 5, 3.0f, SOCKET_DOOR, std::vector<RoomWindow>() };
+    definitions->clear();
+    RoomDefinition entrance;
+    entrance.name = "entrance";
+    entrance.width = 10.0f; entrance.depth = 10.0f; entrance.height = 3.0f;
+    entrance.socketType = SOCKET_DOOR;
+    entrance.weight = 0.0f;
+    entrance.doorWidth = DOOR_WIDTH;
+    entrance.role = "entrance";
+    entrance.windows.push_back(RoomWindow{ ROOM_SIDE_EAST, 0.0f, 2.4f, 1.0f, 1.2f });
+    definitions->push_back(entrance);
+    RoomDefinition hallway;
+    hallway.name = "hallway";
+    hallway.width = 5.0f; hallway.depth = 10.0f; hallway.height = 3.0f;
+    hallway.socketType = SOCKET_CORRIDOR;
+    hallway.weight = 22.0f;
+    hallway.doorWidth = DOOR_WIDTH;
+    hallway.role = "normal";
+    definitions->push_back(hallway);
+    RoomDefinition room;
+    room.name = "room";
+    room.width = 10.0f; room.depth = 10.0f; room.height = 4.0f;
+    room.socketType = SOCKET_DOOR;
+    room.weight = 62.0f;
+    room.doorWidth = DOOR_WIDTH;
+    room.role = "normal";
+    room.windows.push_back(RoomWindow{ ROOM_SIDE_NORTH, 0.0f, 2.6f, 1.0f, 1.2f });
+    room.windows.push_back(RoomWindow{ ROOM_SIDE_EAST, 0.0f, 2.6f, 1.0f, 1.2f });
+    definitions->push_back(room);
+    RoomDefinition bathroom;
+    bathroom.name = "bathroom";
+    bathroom.width = 5.0f; bathroom.depth = 5.0f; bathroom.height = 3.0f;
+    bathroom.socketType = SOCKET_DOOR;
+    bathroom.weight = 16.0f;
+    bathroom.doorWidth = 1.2f;
+    bathroom.role = "utility";
+    bathroom.windows.push_back(RoomWindow{ ROOM_SIDE_WEST, 0.0f, 1.4f, 1.3f, 0.9f });
+    definitions->push_back(bathroom);
 }
 
 static char *Trim(char *text)
@@ -77,21 +85,22 @@ static char *Trim(char *text)
     return text;
 }
 
-static bool ParsePositiveInteger(const char *text, int *value)
-{
-    char *end = NULL;
-    long parsed = strtol(text, &end, 10);
-    if (!end || *Trim(end) || parsed <= 0 || parsed > 1000) return false;
-    *value = (int)parsed;
-    return true;
-}
-
 static bool ParsePositiveFloat(const char *text, float *value)
 {
     char *end = NULL;
     float parsed = strtof(text, &end);
-    if (!end || *Trim(end) || parsed <= 0.0f || parsed > 1000.0f) return false;
+    if (!end || *Trim(end) || !(parsed > 0.0f) || parsed > 1000.0f) return false;
     *value = parsed;
+    return true;
+}
+
+static bool ParseSocket(const char *text, SocketType *socket)
+{
+    if (strcmp(text, "door") == 0) *socket = SOCKET_DOOR;
+    else if (strcmp(text, "corridor") == 0) *socket = SOCKET_CORRIDOR;
+    else if (strcmp(text, "window") == 0) *socket = SOCKET_WINDOW;
+    else if (strcmp(text, "stairs") == 0) *socket = SOCKET_STAIRS;
+    else return false;
     return true;
 }
 
@@ -117,23 +126,35 @@ static bool ParseWindow(const char *text, RoomWindow *window)
     return true;
 }
 
+static int FindTemplateByName(const std::vector<RoomDefinition> &defs, const std::string &name)
+{
+    for (size_t i = 0; i < defs.size(); i++) if (defs[i].name == name) return (int)i;
+    return -1;
+}
+
+static int FindTemplateByRole(const std::vector<RoomDefinition> &defs, const char *role)
+{
+    for (size_t i = 0; i < defs.size(); i++) if (defs[i].role == role) return (int)i;
+    return -1;
+}
+
 bool Building_LoadRoomDefinitions(const char *path)
 {
-    RoomDefinition definitions[ROOM_TYPE_COUNT];
-    SetDefaultRoomDefinitions(definitions);
+    std::vector<RoomDefinition> parsed;
     FILE *file = fopen(path, "r");
     if (!file) {
         fprintf(stderr, "Building definitions: could not open %s; using built-in defaults.\n", path);
         g_roomDefinitionsInitialized = true;
-        SetDefaultRoomDefinitions(g_roomDefinitions);
+        SetDefaultRoomDefinitions(&g_roomDefinitions);
         return false;
     }
 
-    int fields[ROOM_TYPE_COUNT] = {};
-    int currentType = -1;
+    RoomDefinition current;
+    bool inSection = false;
+    bool sectionValid = true;
+    bool seenScalar[8] = {};
     int lineNumber = 0;
-    char line[256];
-    bool valid = true;
+    char line[512];
     while (fgets(line, sizeof(line), file)) {
         lineNumber++;
         char *comment = strchr(line, '#');
@@ -143,90 +164,134 @@ bool Building_LoadRoomDefinitions(const char *path)
 
         size_t length = strlen(text);
         if (text[0] == '[' && length > 2 && text[length - 1] == ']') {
+            if (inSection && sectionValid) parsed.push_back(current);
             text[length - 1] = '\0';
-            currentType = RoomTypeFromName(Trim(text + 1));
-            if (currentType < 0) {
-                // Extra templates are useful to keep beside the active four
-                // types, even though the current enum cannot select them yet.
-                fprintf(stderr, "Building definitions:%d: [%s] is not used by the current generator; ignoring it.\n",
-                        lineNumber, text + 1);
-                currentType = -2;
+            std::string name = Trim(text + 1);
+            if (name.empty() || FindTemplateByName(parsed, name) >= 0) {
+                fprintf(stderr, "Building definitions:%d: duplicate or empty section [%s]; ignoring it.\n",
+                        lineNumber, name.c_str());
+                inSection = false;
+                sectionValid = false;
+            } else {
+                current = RoomDefinition();
+                current.name = name;
+                current.socketType = SOCKET_DOOR;
+                current.weight = 1.0f;
+                current.doorWidth = DOOR_WIDTH;
+                current.role = "normal";
+                memset(seenScalar, 0, sizeof(seenScalar));
+                inSection = true;
+                sectionValid = true;
             }
             continue;
         }
 
         char *equals = strchr(text, '=');
-        if (currentType == -2) continue;
-        if (currentType < 0 || !equals) {
-            fprintf(stderr, "Building definitions:%d: expected [room_type] or key=value.\n", lineNumber);
-            valid = false;
+        if (!inSection || !equals) {
+            fprintf(stderr, "Building definitions:%d: expected [section] or key=value.\n", lineNumber);
+            sectionValid = false;
             continue;
         }
         *equals = '\0';
         char *key = Trim(text);
         char *value = Trim(equals + 1);
-        bool parsed = false;
+        if (!strcmp(key, "width") || !strcmp(key, "depth") ||
+            !strcmp(key, "height") || !strcmp(key, "socket") ||
+            !strcmp(key, "weight") || !strcmp(key, "asset") ||
+            !strcmp(key, "door_width") || !strcmp(key, "role")) {
+            int slot = !strcmp(key, "width") ? 0 : !strcmp(key, "depth") ? 1 :
+                       !strcmp(key, "height") ? 2 : !strcmp(key, "socket") ? 3 :
+                       !strcmp(key, "weight") ? 4 : !strcmp(key, "asset") ? 5 :
+                       !strcmp(key, "door_width") ? 6 : 7;
+            if (seenScalar[slot])
+                fprintf(stderr, "Building definitions:%d: duplicate '%s', using the last value.\n",
+                        lineNumber, key);
+            seenScalar[slot] = true;
+        }
         if (strcmp(key, "width") == 0) {
-            parsed = ParsePositiveInteger(value, &definitions[currentType].width);
-            fields[currentType] |= 1;
-        } else if (strcmp(key, "depth") == 0) {
-            parsed = ParsePositiveInteger(value, &definitions[currentType].depth);
-            fields[currentType] |= 2;
-        } else if (strcmp(key, "height") == 0) {
-            parsed = ParsePositiveFloat(value, &definitions[currentType].height);
-            fields[currentType] |= 4;
-        } else if (strcmp(key, "socket") == 0) {
-            if (strcmp(value, "door") == 0) definitions[currentType].socketType = SOCKET_DOOR;
-            else if (strcmp(value, "corridor") == 0) definitions[currentType].socketType = SOCKET_CORRIDOR;
-            else {
-                fprintf(stderr, "Building definitions:%d: socket must be door or corridor.\n", lineNumber);
-                valid = false;
-                continue;
+            if (!ParsePositiveFloat(value, &current.width)) {
+                fprintf(stderr, "Building definitions:%d: invalid width value '%s'.\n", lineNumber, value);
+                sectionValid = false;
             }
-            parsed = true;
-            fields[currentType] |= 8;
+        } else if (strcmp(key, "depth") == 0) {
+            if (!ParsePositiveFloat(value, &current.depth)) {
+                fprintf(stderr, "Building definitions:%d: invalid depth value '%s'.\n", lineNumber, value);
+                sectionValid = false;
+            }
+        } else if (strcmp(key, "height") == 0) {
+            if (!ParsePositiveFloat(value, &current.height)) {
+                fprintf(stderr, "Building definitions:%d: invalid height value '%s'.\n", lineNumber, value);
+                sectionValid = false;
+            }
+        } else if (strcmp(key, "socket") == 0) {
+            if (!ParseSocket(value, &current.socketType)) {
+                fprintf(stderr, "Building definitions:%d: socket must be door, corridor, window, or stairs.\n",
+                        lineNumber);
+                sectionValid = false;
+            }
+        } else if (strcmp(key, "weight") == 0) {
+            char *end = NULL;
+            float parsed = strtof(value, &end);
+            if (!end || *Trim(end)) {
+                fprintf(stderr, "Building definitions:%d: invalid weight value '%s'.\n", lineNumber, value);
+                sectionValid = false;
+            } else current.weight = parsed;
+        } else if (strcmp(key, "asset") == 0) {
+            current.assetPath = value;
+        } else if (strcmp(key, "door_width") == 0) {
+            if (!ParsePositiveFloat(value, &current.doorWidth)) {
+                fprintf(stderr, "Building definitions:%d: invalid door_width value '%s'.\n", lineNumber, value);
+                sectionValid = false;
+            }
+        } else if (strcmp(key, "role") == 0) {
+            if (strcmp(value, "entrance") && strcmp(value, "normal") &&
+                strcmp(value, "stairs") && strcmp(value, "utility"))
+                fprintf(stderr, "Building definitions:%d: unknown role '%s'.\n", lineNumber, value);
+            current.role = value;
         } else if (strcmp(key, "window") == 0) {
             RoomWindow window = {};
-            parsed = ParseWindow(value, &window);
-            if (parsed) definitions[currentType].windows.push_back(window);
+            if (ParseWindow(value, &window)) current.windows.push_back(window);
+            else fprintf(stderr, "Building definitions:%d: ignoring invalid window '%s'.\n", lineNumber, value);
         } else {
             fprintf(stderr, "Building definitions:%d: unknown key '%s'.\n", lineNumber, key);
-            valid = false;
-            continue;
-        }
-        if (!parsed) {
-            fprintf(stderr, "Building definitions:%d: invalid %s value '%s'.\n", lineNumber, key, value);
-            valid = false;
         }
     }
     fclose(file);
+    if (inSection && sectionValid) parsed.push_back(current);
 
-    for (int type = 0; type < ROOM_TYPE_COUNT; type++) {
-        if (fields[type] != 15) {
-            fprintf(stderr, "Building definitions: [%s] must define width, depth, height, and socket.\n",
-                    Building_RoomTypeName((RoomType)type));
-            valid = false;
+    // Malformed templates are dropped; out-of-bounds windows are dropped
+    // individually. Require at least one entrance so generation stays usable.
+    std::vector<RoomDefinition> validDefs;
+    for (size_t i = 0; i < parsed.size(); i++) {
+        const RoomDefinition &definition = parsed[i];
+        if (!(definition.width > 0.0f) || !(definition.depth > 0.0f) ||
+            !(definition.height > 0.0f)) {
+            fprintf(stderr, "Building definitions: [%s] must define width, depth, and height.\n",
+                    definition.name.c_str());
+            continue;
         }
-        const RoomDefinition &definition = definitions[type];
-        for (size_t windowIndex = 0; windowIndex < definition.windows.size(); windowIndex++) {
-            const RoomWindow &window = definition.windows[windowIndex];
-            float span = window.side < ROOM_SIDE_EAST ? (float)definition.width : (float)definition.depth;
+        RoomDefinition kept = definition;
+        kept.windows.clear();
+        for (size_t w = 0; w < definition.windows.size(); w++) {
+            const RoomWindow &window = definition.windows[w];
+            float span = window.side < ROOM_SIDE_EAST ? definition.width : definition.depth;
             if (fabsf(window.offset) + window.width * 0.5f > span * 0.5f - WALL_THICKNESS ||
                 window.bottom + window.height > definition.height - CEILING_THICKNESS) {
-                fprintf(stderr, "Building definitions: [%s] has a window outside its wall bounds.\n",
-                        Building_RoomTypeName((RoomType)type));
-                valid = false;
+                fprintf(stderr, "Building definitions: [%s] has a window outside its wall bounds; ignoring it.\n",
+                        definition.name.c_str());
+                continue;
             }
+            kept.windows.push_back(window);
         }
+        validDefs.push_back(kept);
     }
     g_roomDefinitionsInitialized = true;
-    if (!valid) {
+    if (validDefs.empty() || FindTemplateByRole(validDefs, "entrance") < 0) {
         fprintf(stderr, "Building definitions: using built-in defaults because %s is invalid.\n", path);
-        SetDefaultRoomDefinitions(g_roomDefinitions);
+        SetDefaultRoomDefinitions(&g_roomDefinitions);
         return false;
     }
-    for (int type = 0; type < ROOM_TYPE_COUNT; type++)
-        g_roomDefinitions[type] = definitions[type];
+    g_roomDefinitions = validDefs;
     return true;
 }
 
@@ -290,41 +355,49 @@ static Vector3 RoomToBuilding(const Room &room, Vector3 point)
                     room.position.z + rotated.z };
 }
 
-static int RoomWidth(RoomType type)
+static const RoomDefinition *TemplateById(int templateId)
 {
     EnsureRoomDefinitionsLoaded();
-    return g_roomDefinitions[type].width;
+    if (templateId < 0 || templateId >= (int)g_roomDefinitions.size()) return NULL;
+    return &g_roomDefinitions[templateId];
 }
 
-static int RoomDepth(RoomType type)
+int Building_RoomTemplateCount(void)
 {
     EnsureRoomDefinitionsLoaded();
-    return g_roomDefinitions[type].depth;
+    return (int)g_roomDefinitions.size();
 }
 
-static float RoomHeight(RoomType type)
+const RoomDefinition *Building_RoomTemplate(int templateId) { return TemplateById(templateId); }
+
+const char *Building_RoomTemplateName(int templateId)
+{
+    const RoomDefinition *definition = TemplateById(templateId);
+    return definition ? definition->name.c_str() : "unknown";
+}
+
+const char *Building_RoomName(const Room &room) { return Building_RoomTemplateName(room.templateId); }
+
+float Building_RoomDoorWidth(const Room &room)
+{
+    const RoomDefinition *definition = TemplateById(room.templateId);
+    return definition ? definition->doorWidth : DOOR_WIDTH;
+}
+
+static Room MakeRoom(int templateId, Vector3 position, float rotation)
 {
     EnsureRoomDefinitionsLoaded();
-    return g_roomDefinitions[type].height;
-}
-
-static SocketType RoomSocketType(RoomType type)
-{
-    EnsureRoomDefinitionsLoaded();
-    return g_roomDefinitions[type].socketType;
-}
-
-static Room MakeRoom(RoomType type, Vector3 position, float rotation)
-{
+    if (templateId < 0 || templateId >= (int)g_roomDefinitions.size()) templateId = 0;
+    const RoomDefinition &definition = g_roomDefinitions[templateId];
     Room room = {};
-    room.type = type;
+    room.templateId = templateId;
     room.position = position;
     room.rotation = rotation;
-    room.width = RoomWidth(type);
-    room.depth = RoomDepth(type);
-    room.height = RoomHeight(type);
-    SocketType socketType = RoomSocketType(type);
-    room.windows = g_roomDefinitions[type].windows;
+    room.width = definition.width;
+    room.depth = definition.depth;
+    room.height = definition.height;
+    room.windows = definition.windows;
+    SocketType socketType = definition.socketType;
     room.sockets.push_back(Socket{ Vector3{ 0.0f, 1.2f, room.depth * 0.5f }, 0.0f, socketType });
     room.sockets.push_back(Socket{ Vector3{ 0.0f, 1.2f, -room.depth * 0.5f }, 180.0f, socketType });
     room.sockets.push_back(Socket{ Vector3{ room.width * 0.5f, 1.2f, 0.0f }, 90.0f, socketType });
@@ -384,11 +457,11 @@ static bool RoomsOverlap(const Room &a, const Room &b)
 }
 
 static bool TryAttach(Building *building, int parentRoom, int parentSocket,
-                      RoomType type, int candidateSocket)
+                      int templateId, int candidateSocket)
 {
     const Room &parent = building->rooms[parentRoom];
     const Socket &parentConnection = parent.sockets[parentSocket];
-    Room candidate = MakeRoom(type, Vector3{ 0.0f, 0.0f, 0.0f }, 0.0f);
+    Room candidate = MakeRoom(templateId, Vector3{ 0.0f, 0.0f, 0.0f }, 0.0f);
     if (!Compatible(parentConnection.type, candidate.sockets[candidateSocket].type)) return false;
 
     float targetDirection = SocketDirection(parent, parentSocket) + 180.0f;
@@ -608,7 +681,7 @@ static int RoomWallPieces(const Building &building, int roomIndex, WallPiece *pi
         float edge = side == 0 ? room.depth * 0.5f :
                      side == 1 ? -room.depth * 0.5f :
                      side == 2 ? room.width * 0.5f : -room.width * 0.5f;
-        float gap = room.type == ROOM_BATHROOM ? 1.2f : DOOR_WIDTH;
+        float gap = Building_RoomDoorWidth(room);
         std::vector<BoundaryInterval> intervals;
         std::vector<float> cuts;
         cuts.push_back(-span * 0.5f);
@@ -760,7 +833,7 @@ void Building_GenerateDoors(Building *building)
         const Room &room = building->rooms[roomIndex];
         Vector3 midpoint = SocketPosition(room, socketIndex);
         float direction = SocketDirection(room, socketIndex);
-        float width = room.type == ROOM_BATHROOM ? 1.2f : DOOR_WIDTH;
+        float width = Building_RoomDoorWidth(room);
         Vector3 tangent = RotateHorizontal(Vector3{ 1.0f, 0.0f, 0.0f }, direction);
         midpoint.y = room.position.y + FLOOR_THICKNESS;
         building->doors.push_back(BuildingDoor{
@@ -777,7 +850,7 @@ void Building_GenerateDoors(Building *building)
     const int socketIndex = building->exteriorSocket;
     Vector3 midpoint = SocketPosition(entrance, socketIndex);
     float direction = SocketDirection(entrance, socketIndex);
-    float width = entrance.type == ROOM_BATHROOM ? 1.2f : DOOR_WIDTH;
+    float width = Building_RoomDoorWidth(entrance);
     Vector3 tangent = RotateHorizontal(Vector3{ 1.0f, 0.0f, 0.0f }, direction);
     midpoint.y = entrance.position.y + FLOOR_THICKNESS;
     building->doors.push_back(BuildingDoor{
@@ -1009,7 +1082,7 @@ static void DrawDoorFrames(const Building &building, const Room &room, int roomI
         if (!SocketIsOpen(building, roomIndex, side) ||
             !SocketOwnsWall(building, roomIndex, side)) continue;
 
-        float gap = room.type == ROOM_BATHROOM ? 1.2f : DOOR_WIDTH;
+        float gap = Building_RoomDoorWidth(building.rooms[roomIndex]);
         float jambHeight = DOOR_HEIGHT - FLOOR_THICKNESS;
         float jambY = FLOOR_THICKNESS + jambHeight * 0.5f;
         float edge = side == 0 ? room.depth * 0.5f :
@@ -1107,13 +1180,21 @@ static void DrawRoomWindows(const Building &building, const Room &room, int room
     }
 }
 
+static Color RoomFloorColor(const Room &room)
+{
+    // Roles drive the tint so new templates style themselves without a switch.
+    const RoomDefinition *definition = TemplateById(room.templateId);
+    const char *role = definition ? definition->role.c_str() : "normal";
+    if (!strcmp(role, "entrance")) return Color{ 133, 121, 96, 255 };
+    if (!strcmp(role, "utility")) return Color{ 105, 147, 154, 255 };
+    if (definition && definition->socketType == SOCKET_CORRIDOR) return Color{ 122, 133, 131, 255 };
+    return Color{ 145, 133, 112, 255 };
+}
+
 static void DrawPlaceholderModule(const Building &building, const Room &room, int roomIndex,
                                   std::vector<DebugGeometry> *debugGeometry)
 {
-    Color floorColor = room.type == ROOM_ENTRANCE ? Color{ 133, 121, 96, 255 } :
-                       room.type == ROOM_HALLWAY ? Color{ 122, 133, 131, 255 } :
-                       room.type == ROOM_BATHROOM ? Color{ 105, 147, 154, 255 } :
-                       Color{ 145, 133, 112, 255 };
+    Color floorColor = RoomFloorColor(room);
     DrawRoomCube(building, room, Vector3{ 0.0f, FLOOR_THICKNESS * 0.5f, 0.0f },
                  Vector3{ (float)room.width, FLOOR_THICKNESS, (float)room.depth }, floorColor);
     AddDebugGeometry(debugGeometry, building, room, Vector3{ 0.0f, FLOOR_THICKNESS * 0.5f, 0.0f },
@@ -1185,6 +1266,24 @@ static bool RoomContainsPoint(const Building &building, const Room &room, float 
     return RoomFootprintCollides(building, room, x, z, 0.0f);
 }
 
+// Picks a template by weight among entries that opt into random selection
+// (weight > 0). Returns -1 when no template carries a positive weight.
+static int PickWeightedTemplate(unsigned int *state)
+{
+    EnsureRoomDefinitionsLoaded();
+    float total = 0.0f;
+    for (size_t i = 0; i < g_roomDefinitions.size(); i++)
+        if (g_roomDefinitions[i].weight > 0.0f) total += g_roomDefinitions[i].weight;
+    if (!(total > 0.0f)) return -1;
+    float roll = (float)(NextRandom(state) % 100000u) * (total / 100000.0f);
+    for (size_t i = 0; i < g_roomDefinitions.size(); i++) {
+        if (g_roomDefinitions[i].weight <= 0.0f) continue;
+        roll -= g_roomDefinitions[i].weight;
+        if (roll < 0.0f) return (int)i;
+    }
+    return -1;
+}
+
 Building Building_Generate(unsigned int seed)
 {
     Building building = {};
@@ -1194,11 +1293,18 @@ Building Building_Generate(unsigned int seed)
     building.exteriorSocket = 1;
     unsigned int state = seed ? seed : 1;
 
-    building.rooms.push_back(MakeRoom(ROOM_ENTRANCE, Vector3{ 0.0f, 0.0f, 0.0f }, 0.0f));
-    TryAttach(&building, 0, 0, ROOM_HALLWAY, 1);
+    EnsureRoomDefinitionsLoaded();
+    int entranceTemplate = FindTemplateByRole(g_roomDefinitions, "entrance");
+    building.rooms.push_back(MakeRoom(entranceTemplate >= 0 ? entranceTemplate : 0,
+                                      Vector3{ 0.0f, 0.0f, 0.0f }, 0.0f));
+
+    int first = PickWeightedTemplate(&state);
+    if (first >= 0) TryAttach(&building, 0, 0, first, 1);
     if (building.rooms.size() > 1) {
-        TryAttach(&building, 1, 2, ROOM_ROOM, 3);
-        TryAttach(&building, 1, 3, ROOM_ROOM, 2);
+        int second = PickWeightedTemplate(&state);
+        if (second >= 0) TryAttach(&building, 1, 2, second, 3);
+        int third = PickWeightedTemplate(&state);
+        if (third >= 0) TryAttach(&building, 1, 3, third, 2);
     }
 
     int extraModules = 2 + (int)(NextRandom(&state) % 5u);
@@ -1208,11 +1314,10 @@ Building Building_Generate(unsigned int seed)
         if (parentRoom == building.entranceRoom && parentSocket == building.exteriorSocket) continue;
         if (IsConnected(building, parentRoom, parentSocket)) continue;
 
-        unsigned int choice = NextRandom(&state) % 100u;
-        RoomType type = choice < 22u ? ROOM_HALLWAY :
-                        choice < 38u ? ROOM_BATHROOM : ROOM_ROOM;
+        int templateId = PickWeightedTemplate(&state);
+        if (templateId < 0) break;
         int socket = (parentSocket + 2) % 4;
-        if (TryAttach(&building, parentRoom, parentSocket, type, socket)) added++;
+        if (TryAttach(&building, parentRoom, parentSocket, templateId, socket)) added++;
     }
     Building_GenerateDoors(&building);
     return building;
@@ -1233,8 +1338,9 @@ bool Building_ValidatePlan(const Building &building)
     std::vector<std::vector<int> > used(building.rooms.size());
     for (size_t i = 0; i < building.rooms.size(); i++) {
         const Room &room = building.rooms[i];
-        if (room.width != RoomWidth(room.type) || room.depth != RoomDepth(room.type) ||
-            fabsf(room.height - RoomHeight(room.type)) > 0.001f ||
+        const RoomDefinition *definition = TemplateById(room.templateId);
+        if (!definition || room.width != definition->width || room.depth != definition->depth ||
+            fabsf(room.height - definition->height) > 0.001f ||
             !RoomInsideBounds(room)) return false;
         if (fabsf(room.position.x / GRID_SIZE - roundf(room.position.x / GRID_SIZE)) > 0.001f ||
             fabsf(room.position.z / GRID_SIZE - roundf(room.position.z / GRID_SIZE)) > 0.001f ||
@@ -1462,12 +1568,14 @@ int Building_RunSeedCheck(unsigned int count)
     return failures;
 }
 
-const char *Building_ModuleAssetPath(RoomType type)
+const char *Building_ModuleAssetPath(int templateId)
 {
-    switch (type) {
-        case ROOM_ENTRANCE: return "assets/entrance.glb";
-        case ROOM_HALLWAY: return "assets/hallway.glb";
-        case ROOM_BATHROOM: return "assets/bathroom.glb";
-        default: return "assets/room.glb";
-    }
+    const RoomDefinition *definition = TemplateById(templateId);
+    if (!definition) return "assets/room.glb";
+    if (!definition->assetPath.empty()) return definition->assetPath.c_str();
+    // Templates without an explicit asset= key fall back to assets/<name>.glb,
+    // which matches the historical layout for entrance/hallway/room/bathroom.
+    static std::string derivedPath;
+    derivedPath = "assets/" + definition->name + ".glb";
+    return derivedPath.c_str();
 }

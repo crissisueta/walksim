@@ -1,5 +1,6 @@
 #pragma once
 #include "raylib.h"
+#include <string>
 #include <vector>
 
 // A procedural building is a graph of axis-aligned local room modules. Room
@@ -16,12 +17,8 @@ enum BuildingType {
     BUILDING_GENERIC
 };
 
-enum RoomType {
-    ROOM_ENTRANCE,
-    ROOM_HALLWAY,
-    ROOM_ROOM,
-    ROOM_BATHROOM
-};
+// Room templates are data loaded from room_types.txt, not C++ enum values.
+// A Room references its template by templateId (index into the registry).
 
 enum SocketType {
     SOCKET_DOOR,
@@ -49,6 +46,22 @@ struct RoomWindow {
     float height;
 };
 
+// A generic room template loaded from room_types.txt. weight <= 0 means the
+// template exists (e.g. the entrance) but is never randomly selected.
+// role identifies special templates ("entrance", "normal", "stairs", "utility").
+struct RoomDefinition {
+    std::string name;
+    float width;
+    float depth;
+    float height;
+    SocketType socketType;
+    std::vector<RoomWindow> windows;
+    float weight;
+    std::string assetPath;
+    float doorWidth;
+    std::string role;
+};
+
 struct Socket {
     // Local doorway/boundary midpoint and its outward-facing rotation.
     Vector3 position;
@@ -57,11 +70,11 @@ struct Socket {
 };
 
 struct Room {
-    RoomType type;
+    int templateId;
     Vector3 position;
     float rotation;
-    int width;
-    int depth;
+    float width;
+    float depth;
     float height;
     std::vector<Socket> sockets;
     std::vector<RoomWindow> windows;
@@ -108,7 +121,11 @@ Building Building_GenerateTestBuilding(unsigned int seed);
 // Loads definitions in the simple [room_type] key=value format. A failed load
 // leaves the built-in definitions active, so generation always remains usable.
 bool Building_LoadRoomDefinitions(const char *path);
-const char *Building_RoomTypeName(RoomType type);
+int Building_RoomTemplateCount(void);
+const RoomDefinition *Building_RoomTemplate(int templateId);
+const char *Building_RoomTemplateName(int templateId);
+const char *Building_RoomName(const Room &room);
+float Building_RoomDoorWidth(const Room &room);
 // Call after position and terrain pads are final. This samples terrain once and
 // stores the resulting visual supports in the building instance.
 void Building_GenerateSupports(Building *building);
@@ -131,7 +148,7 @@ float Building_FloorHeight(const Building &building, float x, float z,
 // Returns the nearest ceiling above minimumHeight, or FLT_MAX if none exists.
 float Building_CeilingHeight(const Building &building, float x, float z,
                              float minimumHeight);
-const char *Building_ModuleAssetPath(RoomType type);
+const char *Building_ModuleAssetPath(int templateId);
 
 // Guide-compatible alias and headless validation entry point.
 Building Building_Generate(unsigned int seed);

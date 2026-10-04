@@ -1,8 +1,12 @@
 # walksim procedural room templates
 #
-# Each required section maps directly to one existing RoomType. Dimensions are
-# in metres. socket controls which existing doorway category the room exposes.
-# Keep width and depth aligned to the 2.5 m building grid for predictable plans.
+# Each section defines one room template. A Room references its template by
+# index (templateId) into this list. Dimensions are in metres. socket controls
+# which doorway category the room exposes, weight controls how often the
+# generator picks the template (weight=0 means never, e.g. the entrance), and
+# role tags special templates (entrance, normal, stairs, utility).
+# Keep width and depth multiples of 5 m so every socket centre stays on the
+# 2.5 m building grid for predictable plans.
 #
 # Optional windows use: window=side,offset,width,bottom,height
 # side is north, south, east, or west; offset is measured from the middle of
@@ -13,6 +17,8 @@ width=10
 depth=10
 height=3
 socket=door
+weight=0
+role=entrance
 window=east,0,2.4,1.0,1.2
 
 [hallway]
@@ -20,12 +26,14 @@ width=5
 depth=10
 height=3
 socket=corridor
+weight=22
 
 [room]
 width=10
 depth=10
 height=4
 socket=door
+weight=62
 window=north,0,2.6,1.0,1.2
 window=east,0,2.6,1.0,1.2
 
@@ -34,10 +42,13 @@ width=5
 depth=5
 height=3
 socket=door
+weight=16
+role=utility
 window=west,0,1.4,1.3,0.9
 
 [hallway2]
-width=13
+width=15
 depth=10
-height=3
+height=5
 socket=corridor
+weight=1

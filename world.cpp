@@ -122,7 +122,7 @@ void World_DrawDebugLabels(Camera3D camera)
             const Room &room = building.rooms[roomIndex];
             Vector2 screen = GetWorldToScreen(Vector3{ building.position.x + room.position.x,
                 building.position.y + room.position.y + room.height * 0.5f, building.position.z + room.position.z }, camera);
-            DrawText(Building_RoomTypeName(room.type), (int)screen.x, (int)screen.y, 14, YELLOW);
+            DrawText(Building_RoomName(room), (int)screen.x, (int)screen.y, 14, YELLOW);
         }
     }
 }
