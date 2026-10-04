@@ -27,3 +27,5 @@ void  Terrain_ClearPads(void);            // remove all local building terrain e
 void  Terrain_AddBuildingPad(float x, float z, float halfWidth, float halfDepth,
                              float height, float blendWidth);
 Model Terrain_BuildModel(void);          // after params change: UnloadModel, then call this again
+// Releases the shared procedural ground-detail texture after the final terrain model unload.
+void  Terrain_Unload(void);

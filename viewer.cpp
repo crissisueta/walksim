@@ -100,4 +100,5 @@ void Viewer_Run(const char *path)
     UnloadModel(model);
     UnloadShader(shader);
     UnloadModel(ground);
+    Terrain_Unload();
 }

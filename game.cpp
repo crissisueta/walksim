@@ -116,6 +116,7 @@ int main(int argc, char **argv)
     }
 
     UnloadModel(terrain);
+    Terrain_Unload();
     World_Unload();
     UnloadShader(lighting);
     CloseWindow();

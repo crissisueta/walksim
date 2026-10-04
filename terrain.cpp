@@ -4,6 +4,7 @@
 // Terrain height is evaluated analytically for gameplay and sampled into a
 // mesh only for rendering, keeping both representations in agreement.
 static unsigned int g_seed = 0;
+static Texture2D g_groundGrassTexture = {};
 
 // Pads are registered by world building placement before the terrain mesh is built.
 // A fixed-size list keeps the terrain API simple and matches the building limit.
@@ -146,6 +147,48 @@ static Color GrassColor(float x, float z, float h, float nx, float ny, float nz)
     return Color{ (unsigned char)r, (unsigned char)g, (unsigned char)b, 255 };
 }
 
+// A tiny procedural detail texture gives the terrain visible grass variation
+// close-up while vertex colours continue to control valley/hill colouring.
+// Change GROUND_GRASS_TILE_METRES to make this detail repeat more or less often.
+static const int GROUND_GRASS_TEXTURE_SIZE = 128;
+static const float GROUND_GRASS_TILE_METRES = 5.0f;
+
+static Texture2D BuildGroundGrassTexture(void)
+{
+    const int size = GROUND_GRASS_TEXTURE_SIZE;
+    Image image = GenImageColor(size, size, WHITE);
+    Color *pixels = (Color *)image.data;
+    for (int y = 0; y < size; y++) for (int x = 0; x < size; x++) {
+        int grain = (int)(Hash(x, y, 11) * 31.0f) - 15;
+        pixels[y * size + x] = Color{ (unsigned char)(205 + grain),
+                                      (unsigned char)(224 + grain),
+                                      (unsigned char)(196 + grain), 255 };
+    }
+    // Short, wrapped darker strokes avoid seams while suggesting individual blades.
+    for (int blade = 0; blade < 360; blade++) {
+        int x = (int)(Hash(blade, 17, 12) * size);
+        int y = (int)(Hash(blade, 31, 13) * size);
+        int length = 2 + (int)(Hash(blade, 47, 14) * 5.0f);
+        int lean = Hash(blade, 59, 15) < 0.5f ? -1 : 1;
+        for (int step = 0; step < length; step++) {
+            int px = (x + lean * step / 3 + size) % size;
+            int py = (y - step + size) % size;
+            pixels[py * size + px] = Color{ 130, 168, 104, 255 };
+        }
+    }
+    Texture2D texture = LoadTextureFromImage(image);
+    UnloadImage(image);
+    SetTextureWrap(texture, TEXTURE_WRAP_REPEAT);
+    SetTextureFilter(texture, TEXTURE_FILTER_BILINEAR);
+    return texture;
+}
+
+void Terrain_Unload(void)
+{
+    if (g_groundGrassTexture.id != 0) UnloadTexture(g_groundGrassTexture);
+    g_groundGrassTexture = Texture2D{};
+}
+
 Model Terrain_BuildModel(void)
 {
     const int   N    = TERRAIN_RES + 1;
@@ -185,8 +228,8 @@ Model Terrain_BuildModel(void)
             mesh.normals[v * 3 + 0] = nx;
             mesh.normals[v * 3 + 1] = ny;
             mesh.normals[v * 3 + 2] = nz;
-            mesh.texcoords[v * 2 + 0] = (float)i / TERRAIN_RES;
-            mesh.texcoords[v * 2 + 1] = (float)j / TERRAIN_RES;
+            mesh.texcoords[v * 2 + 0] = x / GROUND_GRASS_TILE_METRES;
+            mesh.texcoords[v * 2 + 1] = z / GROUND_GRASS_TILE_METRES;
 
             Color c = GrassColor(x, z, h, nx, ny, nz);
             mesh.colors[v * 4 + 0] = c.r;
@@ -210,5 +253,10 @@ Model Terrain_BuildModel(void)
     }
 
     UploadMesh(&mesh, false);
-    return LoadModelFromMesh(mesh);
+    Model terrain = LoadModelFromMesh(mesh);
+    // Models may be rebuilt from the settings panel. Materials only reference
+    // textures, so retain one shared texture until Terrain_Unload().
+    if (g_groundGrassTexture.id == 0) g_groundGrassTexture = BuildGroundGrassTexture();
+    SetMaterialTexture(&terrain.materials[0], MATERIAL_MAP_DIFFUSE, g_groundGrassTexture);
+    return terrain;
 }
