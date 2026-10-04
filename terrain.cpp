@@ -5,8 +5,8 @@
 // mesh only for rendering, keeping both representations in agreement.
 static unsigned int g_seed = 0;
 
-// Pads are registered by city generation before the terrain mesh is built.
-// A fixed-size list keeps the terrain API simple and matches the city limits.
+// Pads are registered by world building placement before the terrain mesh is built.
+// A fixed-size list keeps the terrain API simple and matches the building limit.
 static const int TERRAIN_PAD_LIMIT = 20;
 struct TerrainPad {
     float x, z;

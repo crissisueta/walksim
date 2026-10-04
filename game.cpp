@@ -1,7 +1,8 @@
 #include "raylib.h"
 #include "terrain.h"
 #include "player.h"
-#include "city.h"
+#include "world.h"
+#include "vegetation.h"
 #include "config.h"
 #include "viewer.h"
 #include "lighting.h"
@@ -32,8 +33,8 @@ int main(int argc, char **argv)
 
     Terrain_Init(seed);
     Shader lighting = Lighting_LoadShader();
-    City_Init(seed);
-    City_SetLighting(lighting);
+    World_Init(seed);
+    World_SetLighting(lighting);
     Model terrain = Terrain_BuildModel();
 
     Player player;
@@ -66,7 +67,7 @@ int main(int argc, char **argv)
         }
 
         if (rebuildTerrain) {
-            City_Generate(seed);
+            World_Generate(seed);
             UnloadModel(terrain);
             terrain = Terrain_BuildModel();
             rebuildTerrain = false;
@@ -76,11 +77,11 @@ int main(int argc, char **argv)
         // so you don't end up inside a hill you just made taller.
         bool controls = !panelOpen && skipMouseFrames == 0;
         if (!panelOpen && skipMouseFrames > 0) skipMouseFrames--;
-        City_UpdateDoors(dt);
+        World_UpdateDoors(dt);
         Player_Update(&player, dt, controls);
         Camera3D cam = Player_GetCamera(&player);
-        if (controls && IsKeyPressed(KEY_E)) City_InteractDoor(cam);
-        const char *doorPrompt = controls ? City_DoorPrompt(cam) : NULL;
+        if (controls && IsKeyPressed(KEY_E)) World_InteractDoor(cam);
+        const char *doorPrompt = controls ? World_DoorPrompt(cam) : NULL;
 
         BeginDrawing();
             ClearBackground(SKYBLUE);       // also clears the depth buffer
@@ -90,19 +91,22 @@ int main(int argc, char **argv)
 
             BeginMode3D(cam);
                 DrawModel(terrain, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
-                City_Draw(buildingDebug);
+                World_Draw(buildingDebug);
             EndMode3D();
 
-            if (buildingDebug) City_DrawDebugLabels(cam);
+            if (buildingDebug) World_DrawDebugLabels(cam);
 
-            DrawText(TextFormat("seed %u   %d settlements   %d large structures   %d fps",
-                                 seed, City_Count(), City_LargeBuildingCount(), GetFPS()),
+            DrawText(TextFormat("seed %u   %d buildings   %d trees   %d flower groups   %d grass clumps   %d fps",
+                                 seed, World_BuildingCount(), Vegetation_TreeCount(),
+                                 Vegetation_FlowerCount(), Vegetation_GrassCount(), GetFPS()),
                      10, 10, 20, WHITE);
             DrawText("WASD move   Space jump   Ctrl/C crouch   Shift sprint   E interact   [Tab] settings   [F3] building debug",
                      10, 34, 16, WHITE);
             if (buildingDebug)
-                DrawText(TextFormat("M3 debug   first building seed %u",
-                                    City_FirstLargeBuildingSeed()), 10, 54, 16, WHITE);
+                DrawText(TextFormat("M3 debug   first building seed %u   %d trees   %d flowers   %d grass",
+                                    World_FirstBuildingSeed(), Vegetation_TreeCount(),
+                                    Vegetation_FlowerCount(), Vegetation_GrassCount()),
+                         10, 54, 16, WHITE);
             if (doorPrompt)
                 DrawText(doorPrompt, GetScreenWidth() / 2 - MeasureText(doorPrompt, 20) / 2,
                          GetScreenHeight() / 2 + 36, 20, WHITE);
@@ -112,7 +116,7 @@ int main(int argc, char **argv)
     }
 
     UnloadModel(terrain);
-    City_Unload();
+    World_Unload();
     UnloadShader(lighting);
     CloseWindow();
     return 0;

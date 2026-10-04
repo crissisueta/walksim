@@ -838,7 +838,7 @@ void Building_GenerateSupports(Building *building)
     if (!building) return;
 
     // Supports are derived data. Rebuilding them here is intentional when a
-    // city is regenerated after terrain settings change, but never per frame.
+    // world is regenerated after terrain settings change, but never per frame.
     building->supports.clear();
     for (size_t roomIndex = 0; roomIndex < building->rooms.size(); roomIndex++) {
         const Room &room = building->rooms[roomIndex];

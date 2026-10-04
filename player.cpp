@@ -1,10 +1,10 @@
 #include "player.h"
 #include "terrain.h"
-#include "city.h"
+#include "world.h"
 #include <float.h>
 #include <math.h>
 
-// Player movement queries City_* rather than terrain directly so floors and
+// Player movement queries World_* rather than terrain directly so floors and
 // ceilings seamlessly extend the procedural world without special cases.
 // Tweak these freely.
 static const float EYE_HEIGHT  = 1.55f;   // metres above the feet
@@ -21,7 +21,7 @@ PlayerParams g_playerParams;
 
 static float GroundHeight(float x, float z, float maximumHeight)
 {
-    return City_GroundHeight(x, z, Terrain_Height(x, z), maximumHeight);
+    return World_GroundHeight(x, z, Terrain_Height(x, z), maximumHeight);
 }
 
 void Player_ResetParams(void)
@@ -88,16 +88,16 @@ void Player_Update(Player *p, float dt, bool controls)
     if (nextZ < -limit) nextZ = -limit;
 
     float collisionFeet = grounded ? GroundHeight(nextX, nextZ, p->pos.y + SNAP_DIST) : p->pos.y;
-    if (!City_Collides(nextX, nextZ, PLAYER_RADIUS, collisionFeet, bodyHeight)) {
+    if (!World_Collides(nextX, nextZ, PLAYER_RADIUS, collisionFeet, bodyHeight)) {
         p->pos.x = nextX;
         p->pos.z = nextZ;
     } else {
         float xFeet = grounded ? GroundHeight(nextX, p->pos.z, p->pos.y + SNAP_DIST) : p->pos.y;
-        if (!City_Collides(nextX, p->pos.z, PLAYER_RADIUS, xFeet, bodyHeight))
+        if (!World_Collides(nextX, p->pos.z, PLAYER_RADIUS, xFeet, bodyHeight))
             p->pos.x = nextX;
 
         float zFeet = grounded ? GroundHeight(p->pos.x, nextZ, p->pos.y + SNAP_DIST) : p->pos.y;
-        if (!City_Collides(p->pos.x, nextZ, PLAYER_RADIUS, zFeet, bodyHeight))
+        if (!World_Collides(p->pos.x, nextZ, PLAYER_RADIUS, zFeet, bodyHeight))
             p->pos.z = nextZ;
     }
 
@@ -107,7 +107,7 @@ void Player_Update(Player *p, float dt, bool controls)
     p->velY  -= GRAVITY * dt;
     p->pos.y += p->velY * dt;
     if (p->velY > 0.0f) {
-        float ceiling = City_CeilingHeight(p->pos.x, p->pos.z, previousFeet + bodyHeight);
+        float ceiling = World_CeilingHeight(p->pos.x, p->pos.z, previousFeet + bodyHeight);
         if (ceiling < FLT_MAX && p->pos.y + bodyHeight > ceiling) {
             p->pos.y = ceiling - bodyHeight;
             p->velY = 0.0f;
