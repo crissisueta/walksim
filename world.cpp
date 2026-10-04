@@ -65,6 +65,8 @@ static float FoundationHeight(float x, float z, float halfWidth, float halfDepth
 
 static void GenerateBuildings(unsigned int seed)
 {
+    unsigned int savedState = g_randomState;
+    g_randomState = seed;
     g_buildingCount = 0;
     const float edge = TERRAIN_SIZE * 0.5f - 40.0f;
     for (int attempt = 0; attempt < BUILDING_LIMIT * 180 && g_buildingCount < BUILDING_LIMIT; attempt++) {
@@ -74,16 +76,20 @@ static void GenerateBuildings(unsigned int seed)
         for (int i = 0; i < g_buildingCount; i++)
             if (Distance(x, z, g_buildings[i].position.x, g_buildings[i].position.z) < 55.0f) separated = false;
         if (!separated) continue;
+
         WorldBuilding &instance = g_buildings[g_buildingCount];
-        instance.plan = Building_GenerateTestBuilding(DeriveSeed(seed, (unsigned int)g_buildingCount + 1u));
+        instance.plan = Building_Generate(DeriveSeed(seed, (unsigned int)g_buildingCount + 1u));
         BuildingPadSize(instance.plan, &instance.padHalfWidth, &instance.padHalfDepth);
         float y = FoundationHeight(x, z, instance.padHalfWidth, instance.padHalfDepth);
+        if (Terrain_FlatZoneOverlaps(x, z, instance.padHalfWidth + 3.0f, instance.padHalfDepth + 3.0f)) continue;
         Terrain_AddBuildingPad(x, z, instance.padHalfWidth, instance.padHalfDepth, y, 8.0f);
+        Terrain_AddFlatZone(x, z, instance.padHalfWidth + 2.5f, instance.padHalfDepth + 2.5f, y, 8.0f);
         instance.position = Vector3{ x, y, z };
         instance.plan.position = instance.position;
         Building_GenerateSupports(&instance.plan);
         g_buildingCount++;
     }
+    g_randomState = savedState;
 }
 
 void World_Generate(unsigned int seed)
@@ -91,12 +97,14 @@ void World_Generate(unsigned int seed)
     unsigned int worldSeed = seed ? seed : 1;
     g_randomState = worldSeed;
     Terrain_ClearPads();
+    Terrain_ClearFlatZones();
     GenerateBuildings(worldSeed);
     VegetationAvoidArea avoided[BUILDING_LIMIT];
     for (int i = 0; i < g_buildingCount; i++)
         avoided[i] = VegetationAvoidArea{ g_buildings[i].position.x, g_buildings[i].position.z,
                                           g_buildings[i].padHalfWidth, g_buildings[i].padHalfDepth };
     Vegetation_Generate(DeriveSeed(worldSeed, 0x564547u), avoided, g_buildingCount);
+    g_randomState = worldSeed;
 }
 void World_Init(unsigned int seed) { Vegetation_Init(); World_Generate(seed); }
 void World_SetLighting(Shader shader) { (void)shader; }

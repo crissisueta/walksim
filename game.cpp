@@ -1,5 +1,6 @@
 #include "raylib.h"
 #include "terrain.h"
+#include "building.h"
 #include "player.h"
 #include "world.h"
 #include "vegetation.h"
@@ -15,8 +16,14 @@ int main(int argc, char **argv)
 {
     // World seed:   ./game 839271
     // Model viewer: ./game --view assets/house_01.glb
+    // Headless self-test: ./game --check 20000
     unsigned int seed = 839271;
     const char *viewPath = NULL;
+    if (argc > 1 && strcmp(argv[1], "--check") == 0) {
+        unsigned int count = argc > 2 ? (unsigned int)strtoul(argv[2], NULL, 10) : 20000u;
+        int failures = Building_RunSeedCheck(count);
+        return failures == 0 ? 0 : 1;
+    }
     if (argc > 2 && strcmp(argv[1], "--view") == 0) viewPath = argv[2];
     else if (argc > 1) seed = (unsigned int)strtoul(argv[1], NULL, 10);
 

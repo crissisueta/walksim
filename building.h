@@ -132,3 +132,7 @@ float Building_FloorHeight(const Building &building, float x, float z,
 float Building_CeilingHeight(const Building &building, float x, float z,
                              float minimumHeight);
 const char *Building_ModuleAssetPath(RoomType type);
+
+// Guide-compatible alias and headless validation entry point.
+Building Building_Generate(unsigned int seed);
+int Building_RunSeedCheck(unsigned int count);

@@ -1,5 +1,6 @@
 #include "terrain.h"
 #include <math.h>
+#include <vector>
 
 // Terrain height is evaluated analytically for gameplay and sampled into a
 // mesh only for rendering, keeping both representations in agreement.
@@ -17,6 +18,14 @@ struct TerrainPad {
 };
 static TerrainPad g_pads[TERRAIN_PAD_LIMIT];
 static int g_padCount = 0;
+
+struct FlatZone {
+    float x, z;
+    float halfX, halfZ;
+    float height;
+    float blend;
+};
+static std::vector<FlatZone> g_flatZones;
 
 // ---------------------------------------------------------------------------
 // Seeded value noise. No external library, fully deterministic for a given seed.
@@ -72,9 +81,10 @@ void Terrain_Init(unsigned int seed)
     g_seed = seed;
     Terrain_ResetParams();
     Terrain_ClearPads();
+    Terrain_ClearFlatZones();
 }
 
-float Terrain_BaseHeight(float x, float z)
+static float NoiseHeight(float x, float z)
 {
     // Three octaves: big hills, medium bumps, small ripples (see TerrainParams).
     const TerrainParams &p = g_terrainParams;
@@ -84,9 +94,36 @@ float Terrain_BaseHeight(float x, float z)
     return h;
 }
 
+float Terrain_BaseHeight(float x, float z)
+{
+    return NoiseHeight(x, z);
+}
+
 void Terrain_ClearPads(void)
 {
     g_padCount = 0;
+}
+
+void Terrain_ClearFlatZones(void)
+{
+    g_flatZones.clear();
+}
+
+void Terrain_AddFlatZone(float x, float z, float halfX, float halfZ, float height, float blend)
+{
+    if (halfX <= 0.0f || halfZ <= 0.0f) return;
+    g_flatZones.push_back(FlatZone{ x, z, halfX, halfZ, height, blend > 0.1f ? blend : 0.1f });
+}
+
+bool Terrain_FlatZoneOverlaps(float x, float z, float halfX, float halfZ)
+{
+    for (size_t i = 0; i < g_flatZones.size(); i++) {
+        const FlatZone &zone = g_flatZones[i];
+        float dx = fabsf(x - zone.x);
+        float dz = fabsf(z - zone.z);
+        if (dx < halfX + zone.halfX && dz < halfZ + zone.halfZ) return true;
+    }
+    return false;
 }
 
 void Terrain_AddBuildingPad(float x, float z, float halfWidth, float halfDepth,
@@ -98,7 +135,26 @@ void Terrain_AddBuildingPad(float x, float z, float halfWidth, float halfDepth,
 
 float Terrain_Height(float x, float z)
 {
-    float height = Terrain_BaseHeight(x, z);
+    float height = NoiseHeight(x, z);
+
+    for (size_t i = 0; i < g_flatZones.size(); i++) {
+        const FlatZone &zone = g_flatZones[i];
+        float dx = fabsf(x - zone.x) - zone.halfX;
+        float dz = fabsf(z - zone.z) - zone.halfZ;
+        if (dx > zone.blend || dz > zone.blend) continue;
+        if (fabsf(x - zone.x) <= zone.halfX && fabsf(z - zone.z) <= zone.halfZ) {
+            return zone.height;
+        }
+
+        float insideX = fmaxf(0.0f, fabsf(x - zone.x) - zone.halfX);
+        float insideZ = fmaxf(0.0f, fabsf(z - zone.z) - zone.halfZ);
+        float distance = sqrtf(insideX * insideX + insideZ * insideZ);
+        if (distance >= zone.blend) continue;
+        float t = distance / zone.blend;
+        float blend = t * t * (3.0f - 2.0f * t);
+        height = Lerpf(zone.height, height, blend);
+    }
+
     for (int i = 0; i < g_padCount; i++) {
         const TerrainPad &pad = g_pads[i];
         float dx = fabsf(x - pad.x) - pad.halfWidth;

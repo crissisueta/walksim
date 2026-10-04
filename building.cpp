@@ -1185,7 +1185,7 @@ static bool RoomContainsPoint(const Building &building, const Room &room, float 
     return RoomFootprintCollides(building, room, x, z, 0.0f);
 }
 
-Building Building_GenerateTestBuilding(unsigned int seed)
+Building Building_Generate(unsigned int seed)
 {
     Building building = {};
     building.type = BUILDING_GENERIC;
@@ -1216,6 +1216,11 @@ Building Building_GenerateTestBuilding(unsigned int seed)
     }
     Building_GenerateDoors(&building);
     return building;
+}
+
+Building Building_GenerateTestBuilding(unsigned int seed)
+{
+    return Building_Generate(seed);
 }
 
 bool Building_ValidatePlan(const Building &building)
@@ -1417,6 +1422,44 @@ float Building_CeilingHeight(const Building &building, float x, float z,
             ceiling = underside;
     }
     return ceiling;
+}
+
+// Headless self test for --check mode. It intentionally avoids raylib and the window.
+int Building_RunSeedCheck(unsigned int count)
+{
+    int failures = 0;
+    size_t minRooms = (size_t)-1;
+    size_t maxRooms = 0;
+    size_t totalRooms = 0;
+    size_t totalLoops = 0;
+
+    for (unsigned int seed = 1; seed <= count; seed++) {
+        Building building = Building_Generate(seed);
+        if (!Building_ValidatePlan(building)) {
+            failures++;
+            continue;
+        }
+
+        if (building.rooms.size() < minRooms) minRooms = building.rooms.size();
+        if (building.rooms.size() > maxRooms) maxRooms = building.rooms.size();
+        totalRooms += building.rooms.size();
+
+        size_t roomLoops = 0;
+        for (size_t i = 0; i < building.connections.size(); i++) {
+            const BuildingConnection &connection = building.connections[i];
+            if (connection.roomA != connection.roomB) roomLoops++;
+        }
+        totalLoops += roomLoops;
+    }
+
+    unsigned int ok = count - (unsigned int)failures;
+    printf("checked %u seeds, %d failed; rooms min %u avg %.1f max %u; loop doors total %zu\n",
+           count, failures,
+           (unsigned)(minRooms == (size_t)-1 ? 0 : minRooms),
+           ok ? (double)totalRooms / ok : 0.0,
+           (unsigned)maxRooms,
+           totalLoops);
+    return failures;
 }
 
 const char *Building_ModuleAssetPath(RoomType type)
