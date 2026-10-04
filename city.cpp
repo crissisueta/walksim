@@ -403,8 +403,65 @@ void City_DrawDebugLabels(Camera3D camera)
                 Vector2 screen = GetWorldToScreen(center, camera);
                 DrawText(Building_RoomTypeName(room.type), (int)screen.x, (int)screen.y, 14, YELLOW);
             }
+            float score = 0.0f;
+            int doorIndex = Building_FindDoor(building, camera, 3.0f, &score);
+            if (doorIndex >= 0) {
+                const BuildingDoor &door = building.doors[doorIndex];
+                Vector3 marker = Vector3{ building.position.x + door.position.x,
+                                          building.position.y + door.position.y + door.height + 0.2f,
+                                          building.position.z + door.position.z };
+                Vector2 screen = GetWorldToScreen(marker, camera);
+                DrawText(TextFormat("Door: %s  %.0f deg", door.open ? "open" : "closed", door.openAngle),
+                         (int)screen.x, (int)screen.y, 14, LIME);
+            }
         }
     }
+}
+
+void City_UpdateDoors(float dt)
+{
+    for (int i = 0; i < g_cityCount; i++)
+        for (int j = 0; j < g_cities[i].largeBuildingCount; j++)
+            Building_UpdateDoors(&g_cities[i].largeBuildings[j].plan, dt);
+}
+
+static bool FindCityDoor(Camera3D camera, int *cityIndex, int *buildingIndex, int *doorIndex)
+{
+    float bestScore = -FLT_MAX;
+    bool found = false;
+    for (int i = 0; i < g_cityCount; i++) {
+        for (int j = 0; j < g_cities[i].largeBuildingCount; j++) {
+            float score = -FLT_MAX;
+            int candidate = Building_FindDoor(g_cities[i].largeBuildings[j].plan, camera, 3.0f, &score);
+            if (candidate >= 0 && score > bestScore) {
+                bestScore = score;
+                *cityIndex = i;
+                *buildingIndex = j;
+                *doorIndex = candidate;
+                found = true;
+            }
+        }
+    }
+    return found;
+}
+
+const char *City_DoorPrompt(Camera3D camera)
+{
+    int cityIndex, buildingIndex, doorIndex;
+    if (!FindCityDoor(camera, &cityIndex, &buildingIndex, &doorIndex)) return NULL;
+    const BuildingDoor &door = g_cities[cityIndex].largeBuildings[buildingIndex].plan.doors[doorIndex];
+    if (fabsf(door.openAngle - door.targetAngle) > 0.01f) return NULL;
+    return door.open ? "E - Close" : "E - Open";
+}
+
+bool City_InteractDoor(Camera3D camera)
+{
+    int cityIndex, buildingIndex, doorIndex;
+    if (!FindCityDoor(camera, &cityIndex, &buildingIndex, &doorIndex)) return false;
+    BuildingDoor &door = g_cities[cityIndex].largeBuildings[buildingIndex].plan.doors[doorIndex];
+    if (fabsf(door.openAngle - door.targetAngle) > 0.01f) return false;
+    Building_ToggleDoor(&g_cities[cityIndex].largeBuildings[buildingIndex].plan, doorIndex);
+    return true;
 }
 
 bool City_Collides(float x, float z, float radius, float feetY, float height)

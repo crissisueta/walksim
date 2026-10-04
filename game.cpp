@@ -76,8 +76,11 @@ int main(int argc, char **argv)
         // so you don't end up inside a hill you just made taller.
         bool controls = !panelOpen && skipMouseFrames == 0;
         if (!panelOpen && skipMouseFrames > 0) skipMouseFrames--;
+        City_UpdateDoors(dt);
         Player_Update(&player, dt, controls);
         Camera3D cam = Player_GetCamera(&player);
+        if (controls && IsKeyPressed(KEY_E)) City_InteractDoor(cam);
+        const char *doorPrompt = controls ? City_DoorPrompt(cam) : NULL;
 
         BeginDrawing();
             ClearBackground(SKYBLUE);       // also clears the depth buffer
@@ -95,11 +98,14 @@ int main(int argc, char **argv)
             DrawText(TextFormat("seed %u   %d settlements   %d large structures   %d fps",
                                  seed, City_Count(), City_LargeBuildingCount(), GetFPS()),
                      10, 10, 20, WHITE);
-            DrawText("WASD move   Space jump   Ctrl/C crouch   Shift sprint   [Tab] settings   [F3] building debug",
+            DrawText("WASD move   Space jump   Ctrl/C crouch   Shift sprint   E interact   [Tab] settings   [F3] building debug",
                      10, 34, 16, WHITE);
             if (buildingDebug)
                 DrawText(TextFormat("M3 debug   first building seed %u",
                                     City_FirstLargeBuildingSeed()), 10, 54, 16, WHITE);
+            if (doorPrompt)
+                DrawText(doorPrompt, GetScreenWidth() / 2 - MeasureText(doorPrompt, 20) / 2,
+                         GetScreenHeight() / 2 + 36, 20, WHITE);
             if (panelOpen && Config_Draw()) rebuildTerrain = true;
             if (Config_ConsumeChanged()) Config_Save(panelOpen, buildingDebug);
         EndDrawing();

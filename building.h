@@ -75,6 +75,23 @@ struct BuildingConnection {
     int socketB;
 };
 
+// A movable panel derived from an existing socket opening. position and hinge
+// are in building-local coordinates; rotation faces out through the owning
+// room wall. The topology remains owned by rooms/connections above.
+struct BuildingDoor {
+    Vector3 position;
+    Vector3 hingePosition;
+    float width;
+    float height;
+    float rotation;
+    float openAngle;
+    float targetAngle;
+    bool open;
+    int roomIndex;
+    int socketIndex;
+    int openingDirection;
+};
+
 struct Building {
     BuildingType type;
     Vector3 position;
@@ -83,6 +100,7 @@ struct Building {
     int exteriorSocket;
     std::vector<Room> rooms;
     std::vector<BuildingConnection> connections;
+    std::vector<BuildingDoor> doors;
     std::vector<BuildingSupport> supports;
 };
 
@@ -94,6 +112,13 @@ const char *Building_RoomTypeName(RoomType type);
 // Call after position and terrain pads are final. This samples terrain once and
 // stores the resulting visual supports in the building instance.
 void Building_GenerateSupports(Building *building);
+// Rebuilds movable panels from the existing connection/exterior doorway data.
+// Editors which change room topology can call this after their edit.
+void Building_GenerateDoors(Building *building);
+void Building_UpdateDoors(Building *building, float dt);
+int Building_FindDoor(const Building &building, Camera3D camera, float maxDistance,
+                      float *score);
+void Building_ToggleDoor(Building *building, int doorIndex);
 // Checks grid alignment, overlap, socket pairing, and graph connectivity.
 bool Building_ValidatePlan(const Building &building);
 // Rendering and collision consume the generated plan; neither changes it.

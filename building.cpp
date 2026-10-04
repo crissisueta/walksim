@@ -1,5 +1,6 @@
 #include "building.h"
 #include "terrain.h"
+#include "rlgl.h"
 #include <float.h>
 #include <math.h>
 #include <stdio.h>
@@ -22,6 +23,10 @@ static const float BUILDING_SUPPORT_MIN_HEIGHT = 0.25f;
 static const float BUILDING_SUPPORT_DUPLICATE_DISTANCE = 0.75f;
 static const float BUILDING_SUPPORT_WIDTH = 0.35f;
 static const float BUILDING_STEP_HEIGHT = 0.30f;
+static const float DOOR_PANEL_THICKNESS = 0.075f;
+static const float DOOR_FRAME_CLEARANCE = 0.10f;
+static const float DOOR_OPEN_ANGLE = 92.0f;
+static const float DOOR_ANGULAR_SPEED = 220.0f;
 
 // Room templates intentionally use a tiny INI-like format instead of a
 // general serialization system. The generator only needs dimensions and the
@@ -671,6 +676,163 @@ static Vector3 WorldPosition(const Building &building, const Room &room, Vector3
                     building.position.z + point.z };
 }
 
+static Vector3 RotateHorizontal(Vector3 point, float degrees)
+{
+    return RotateLocal(point, degrees);
+}
+
+static Vector3 DoorWorldPoint(const Building &building, const BuildingDoor &door, Vector3 local)
+{
+    return Vector3{ building.position.x + door.hingePosition.x + local.x,
+                    building.position.y + door.hingePosition.y + local.y,
+                    building.position.z + door.hingePosition.z + local.z };
+}
+
+static Vector3 DoorLeafDirection(const BuildingDoor &door)
+{
+    return RotateHorizontal(Vector3{ 1.0f, 0.0f, 0.0f },
+                            door.rotation + door.openAngle * door.openingDirection);
+}
+
+static Vector3 DoorCenter(const Building &building, const BuildingDoor &door)
+{
+    Vector3 leaf = DoorLeafDirection(door);
+    return DoorWorldPoint(building, door,
+                          Vector3{ leaf.x * door.width * 0.5f, door.height * 0.5f, leaf.z * door.width * 0.5f });
+}
+
+static float SegmentDistanceSquared(float x, float z, Vector3 a, Vector3 b);
+
+static void DrawDoorPanel(const Building &building, const BuildingDoor &door, bool debug)
+{
+    Vector3 center = DoorCenter(building, door);
+    float angle = door.rotation + door.openAngle * door.openingDirection;
+    const Color panel = Color{ 112, 76, 47, 255 };
+    // This project uses a raylib version without DrawCubePro.  Apply the
+    // equivalent local transform around the panel centre through rlgl.
+    rlPushMatrix();
+        rlTranslatef(center.x, center.y, center.z);
+        rlRotatef(angle, 0.0f, 1.0f, 0.0f);
+        DrawCubeV(Vector3{ 0.0f, 0.0f, 0.0f },
+                  Vector3{ door.width, door.height, DOOR_PANEL_THICKNESS }, panel);
+    rlPopMatrix();
+
+    // A small handle on the free edge makes the moving panel legible without
+    // adding another asset or changing the existing doorway frame geometry.
+    Vector3 leaf = DoorLeafDirection(door);
+    Vector3 handle = DoorWorldPoint(building, door, Vector3{
+        leaf.x * (door.width - 0.16f), door.height * 0.52f,
+        leaf.z * (door.width - 0.16f)
+    });
+    DrawSphere(handle, 0.045f, Color{ 206, 180, 104, 255 });
+    if (debug) {
+        Vector3 hinge = DoorWorldPoint(building, door, Vector3{ 0.0f, 0.08f, 0.0f });
+        DrawSphere(hinge, 0.07f, ORANGE);
+        DrawLine3D(hinge, center, door.open ? LIME : RED);
+    }
+}
+
+static bool DoorCollides(const Building &building, const BuildingDoor &door,
+                         float x, float z, float radius, float feetY, float height)
+{
+    float minY = building.position.y + door.hingePosition.y;
+    float maxY = minY + door.height;
+    if (feetY >= maxY || feetY + height <= minY) return false;
+
+    Vector3 hinge = DoorWorldPoint(building, door, Vector3{ 0.0f, 0.0f, 0.0f });
+    Vector3 leaf = DoorLeafDirection(door);
+    Vector3 end = Vector3{ hinge.x + leaf.x * door.width, hinge.y, hinge.z + leaf.z * door.width };
+    float collisionRadius = radius + DOOR_PANEL_THICKNESS * 0.5f;
+    return SegmentDistanceSquared(x, z, hinge, end) < collisionRadius * collisionRadius;
+}
+
+void Building_GenerateDoors(Building *building)
+{
+    if (!building) return;
+    building->doors.clear();
+
+    // Connections store a unique owner (roomA); this exactly matches the wall
+    // opening/frame owner and prevents a second panel in shared doorways.
+    for (size_t connectionIndex = 0; connectionIndex < building->connections.size(); connectionIndex++) {
+        const BuildingConnection &connection = building->connections[connectionIndex];
+        const int roomIndex = connection.roomA;
+        const int socketIndex = connection.socketA;
+        const Room &room = building->rooms[roomIndex];
+        Vector3 midpoint = SocketPosition(room, socketIndex);
+        float direction = SocketDirection(room, socketIndex);
+        float width = room.type == ROOM_BATHROOM ? 1.2f : DOOR_WIDTH;
+        Vector3 tangent = RotateHorizontal(Vector3{ 1.0f, 0.0f, 0.0f }, direction);
+        midpoint.y = room.position.y + FLOOR_THICKNESS;
+        building->doors.push_back(BuildingDoor{
+            midpoint,
+            Vector3{ midpoint.x - tangent.x * width * 0.5f,
+                     midpoint.y,
+                     midpoint.z - tangent.z * width * 0.5f },
+            width, DOOR_HEIGHT - FLOOR_THICKNESS - DOOR_FRAME_CLEARANCE,
+            direction, 0.0f, 0.0f, false, roomIndex, socketIndex, 1
+        });
+    }
+
+    const Room &entrance = building->rooms[building->entranceRoom];
+    const int socketIndex = building->exteriorSocket;
+    Vector3 midpoint = SocketPosition(entrance, socketIndex);
+    float direction = SocketDirection(entrance, socketIndex);
+    float width = entrance.type == ROOM_BATHROOM ? 1.2f : DOOR_WIDTH;
+    Vector3 tangent = RotateHorizontal(Vector3{ 1.0f, 0.0f, 0.0f }, direction);
+    midpoint.y = entrance.position.y + FLOOR_THICKNESS;
+    building->doors.push_back(BuildingDoor{
+        midpoint,
+        Vector3{ midpoint.x - tangent.x * width * 0.5f,
+                 midpoint.y,
+                 midpoint.z - tangent.z * width * 0.5f },
+        width, DOOR_HEIGHT - FLOOR_THICKNESS - DOOR_FRAME_CLEARANCE,
+        direction, 0.0f, 0.0f, false, building->entranceRoom, socketIndex, 1
+    });
+}
+
+void Building_UpdateDoors(Building *building, float dt)
+{
+    if (!building) return;
+    float step = DOOR_ANGULAR_SPEED * dt;
+    for (size_t i = 0; i < building->doors.size(); i++) {
+        BuildingDoor &door = building->doors[i];
+        if (door.openAngle < door.targetAngle) door.openAngle = fminf(door.openAngle + step, door.targetAngle);
+        else if (door.openAngle > door.targetAngle) door.openAngle = fmaxf(door.openAngle - step, door.targetAngle);
+    }
+}
+
+int Building_FindDoor(const Building &building, Camera3D camera, float maxDistance, float *score)
+{
+    Vector3 view = Vector3{ camera.target.x - camera.position.x, camera.target.y - camera.position.y,
+                            camera.target.z - camera.position.z };
+    float viewLength = sqrtf(view.x * view.x + view.y * view.y + view.z * view.z);
+    if (viewLength <= 0.001f) return -1;
+    view.x /= viewLength; view.y /= viewLength; view.z /= viewLength;
+    int best = -1;
+    float bestScore = -FLT_MAX;
+    for (size_t i = 0; i < building.doors.size(); i++) {
+        Vector3 center = DoorCenter(building, building.doors[i]);
+        float dx = center.x - camera.position.x, dy = center.y - camera.position.y, dz = center.z - camera.position.z;
+        float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (distance > maxDistance || distance < 0.001f) continue;
+        float alignment = (dx * view.x + dy * view.y + dz * view.z) / distance;
+        if (alignment < 0.72f) continue;
+        float candidate = alignment * 2.0f - distance / maxDistance;
+        if (candidate > bestScore) { best = (int)i; bestScore = candidate; }
+    }
+    if (score) *score = bestScore;
+    return best;
+}
+
+void Building_ToggleDoor(Building *building, int doorIndex)
+{
+    if (!building || doorIndex < 0 || doorIndex >= (int)building->doors.size()) return;
+    BuildingDoor &door = building->doors[doorIndex];
+    if (fabsf(door.openAngle - door.targetAngle) > 0.01f) return;
+    door.open = !door.open;
+    door.targetAngle = door.open ? DOOR_OPEN_ANGLE : 0.0f;
+}
+
 void Building_GenerateSupports(Building *building)
 {
     if (!building) return;
@@ -1052,6 +1214,7 @@ Building Building_GenerateTestBuilding(unsigned int seed)
         int socket = (parentSocket + 2) % 4;
         if (TryAttach(&building, parentRoom, parentSocket, type, socket)) added++;
     }
+    Building_GenerateDoors(&building);
     return building;
 }
 
@@ -1166,6 +1329,8 @@ void Building_Draw(const Building &building, bool debug)
             DrawLine3D(marker, end, color);
         }
     }
+    for (size_t doorIndex = 0; doorIndex < building.doors.size(); doorIndex++)
+        DrawDoorPanel(building, building.doors[doorIndex], debug);
     if (debug) {
         for (size_t i = 0; i < debugGeometry.size(); i++)
             DrawBoundingBox(debugGeometry[i].bounds, DebugGeometryColor(debugGeometry[i].type));
@@ -1176,6 +1341,12 @@ void Building_Draw(const Building &building, bool debug)
 bool Building_Collides(const Building &building, float x, float z,
                        float radius, float feetY, float height)
 {
+    // The doorway remains an opening in the wall topology.  Only the panel
+    // itself blocks movement, and its collision segment follows its hinge.
+    for (size_t doorIndex = 0; doorIndex < building.doors.size(); doorIndex++)
+        if (DoorCollides(building, building.doors[doorIndex], x, z, radius, feetY, height))
+            return true;
+
     for (size_t roomIndex = 0; roomIndex < building.rooms.size(); roomIndex++) {
         const Room &room = building.rooms[roomIndex];
         WallPiece pieces[WALL_PIECE_LIMIT];
