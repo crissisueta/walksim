@@ -69,6 +69,16 @@ static bool FarFromTrees(float x, float z)
     return true;
 }
 
+static unsigned char TintByte(float tint)
+{
+    // Clamp to the 0-255 Color range. Values above 1.0 (e.g. up to 1.12)
+    // would otherwise overflow 'unsigned char' when scaled by 255, which
+    // is undefined behavior in C++ and wraps to near-black on x86.
+    float scaled = 255.0f * tint;
+    if (scaled > 255.0f) scaled = 255.0f;
+    return (unsigned char)scaled;
+}
+
 static void Place(VegetationInstance *items, int *count, int limit, float minWidth, float maxWidth,
                   float minHeight, float maxHeight, const VegetationAvoidArea *avoided,
                   int avoidedCount, bool trees)
@@ -79,12 +89,12 @@ static void Place(VegetationInstance *items, int *count, int limit, float minWid
         if (TerrainSlope(x, z) > 0.36f || NearBuilding(x, z, avoided, avoidedCount) ||
             (trees && !FarFromTrees(x, z))) continue;
         float tint = RandomRange(0.86f, 1.12f);
+        unsigned char shade = TintByte(tint);
         items[(*count)++] = VegetationInstance{
             Vector3{ x, Terrain_Height(x, z), z },
             RandomRange(minWidth, maxWidth), RandomRange(minHeight, maxHeight),
             RandomRange(0.0f, PI),
-            Color{ (unsigned char)(255.0f * tint), (unsigned char)(255.0f * tint),
-                   (unsigned char)(255.0f * tint), 255 }
+            Color{ shade, shade, shade, 255 }
         };
     }
 }
